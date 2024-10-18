@@ -61,6 +61,8 @@ pytest-cov = "==4.1.0"
 pytest-asyncio = "==0.23.8"
 aioresponses = "==0.7.6"
 pytest-mock = "==3.14.0"
+pytest-lazy-fixtures = "^1.1.1"
+pytest-dependency = "^0.6.0"
 
 [build-system]
 requires = ["poetry-core"]
