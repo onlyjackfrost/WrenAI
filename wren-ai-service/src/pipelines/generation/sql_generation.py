@@ -29,9 +29,7 @@ logger = logging.getLogger("wren-ai-service")
 sql_generation_user_prompt_template = """
 ### TASK ###
 Given a user query that is ambiguous in nature, your task is to interpret the query in various plausible ways and
-generate three SQL statements that could potentially answer each interpreted version of the queries.
-Provide three different interpretations and corresponding SQL queries that reflect these interpretations.
-Ensure that your SQL queries are diverse, covering a range of possible meanings behind the ambiguous query.
+generate SQL statement that could potentially answer user's question.
 
 ### EXAMPLES ###
 Consider the structure of a generic database which includes common tables like users, orders, products, and transactions.
@@ -84,9 +82,7 @@ The final answer must be the JSON format like following:
 
 {
     "results": [
-        {"sql": <SQL_QUERY_STRING_1>},
-        {"sql": <SQL_QUERY_STRING_2>},
-        {"sql": <SQL_QUERY_STRING_3>}
+        {"sql": <SQL_QUERY_STRING>}
     ]
 }
 

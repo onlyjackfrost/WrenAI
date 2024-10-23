@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Dict, List, Literal, Optional
 
@@ -228,27 +229,41 @@ class AskService:
                     )
 
                 if ask_request.history:
-                    text_to_sql_generation_results = await self._pipelines[
-                        "followup_sql_generation"
-                    ].run(
-                        query=ask_request.query,
-                        contexts=documents,
-                        history=ask_request.history,
-                        project_id=ask_request.project_id,
-                        configurations=ask_request.configurations,
-                    )
+                    sql_generation_tasks = [
+                        asyncio.create_task(
+                            self._pipelines["followup_sql_generation"].run(
+                                query=ask_request.query,
+                                contexts=documents,
+                                history=ask_request.history,
+                                project_id=ask_request.project_id,
+                                configurations=ask_request.configurations,
+                            )
+                        )
+                        for _ in range(3)
+                    ]
                 else:
-                    text_to_sql_generation_results = await self._pipelines[
-                        "sql_generation"
-                    ].run(
-                        query=ask_request.query,
-                        contexts=documents,
-                        exclude=historical_question_result,
-                        project_id=ask_request.project_id,
-                        configurations=ask_request.configurations,
-                    )
+                    sql_generation_tasks = [
+                        asyncio.create_task(
+                            self._pipelines["sql_generation"].run(
+                                query=ask_request.query,
+                                contexts=documents,
+                                exclude=historical_question_result,
+                                project_id=ask_request.project_id,
+                                configurations=ask_request.configurations,
+                            )
+                        )
+                        for _ in range(3)
+                    ]
 
-                if sql_valid_results := text_to_sql_generation_results["post_process"][
+                # Wait for the first task to complete
+                done, pending = await asyncio.wait(
+                    sql_generation_tasks, return_when=asyncio.FIRST_COMPLETED
+                )
+
+                # Get the result of the first completed task
+                first_result = done.pop().result()
+
+                if sql_valid_results := first_result["post_process"][
                     "valid_generation_results"
                 ]:
                     valid_sql_summary_results = (
@@ -268,16 +283,52 @@ class AskService:
                         response=api_results,
                     )
 
-                if failed_dry_run_results := self._get_failed_dry_run_results(
-                    text_to_sql_generation_results["post_process"][
-                        "invalid_generation_results"
-                    ]
-                ):
+                # Gather results from remaining tasks
+                other_results = await asyncio.gather(*pending, return_exceptions=True)
+
+                # Process other results
+                for result in other_results:
+                    if isinstance(result, Exception):
+                        continue
+                    if sql_valid_results := result["post_process"][
+                        "valid_generation_results"
+                    ]:
+                        valid_sql_summary_results = (
+                            await self._add_summary_to_sql_candidates(
+                                sql_valid_results,
+                                ask_request.query,
+                                ask_request.configurations.language,
+                            )
+                        )
+                        api_results = (
+                            api_results
+                            + [
+                                AskResult(**result)
+                                for result in valid_sql_summary_results
+                            ]
+                        )[:3]
+                        self._ask_results[query_id] = AskResultResponse(
+                            status="generating",
+                            response=api_results,
+                        )
+
+                # Collect all invalid results for SQL correction
+                all_invalid_results = []
+                for result in [first_result] + other_results:
+                    if isinstance(result, dict):
+                        all_invalid_results.extend(
+                            self._get_failed_dry_run_results(
+                                result["post_process"]["invalid_generation_results"]
+                            )
+                        )
+
+                # Perform SQL correction if there are invalid results
+                if all_invalid_results:
                     sql_correction_results = await self._pipelines[
                         "sql_correction"
                     ].run(
                         contexts=documents,
-                        invalid_generation_results=failed_dry_run_results,
+                        invalid_generation_results=all_invalid_results,
                         project_id=ask_request.project_id,
                     )
                     if valid_generation_results := sql_correction_results[
@@ -298,6 +349,7 @@ class AskService:
                             ]
                         )[:3]
 
+                print(f"api_results: {api_results}")
                 if api_results:
                     self._ask_results[query_id] = AskResultResponse(
                         status="finished",
