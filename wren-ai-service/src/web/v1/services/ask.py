@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from typing import Dict, List, Literal, Optional
 
@@ -7,7 +6,12 @@ from langfuse.decorators import observe
 from pydantic import AliasChoices, BaseModel, Field
 
 from src.core.pipeline import BasicPipeline
-from src.utils import async_timer, remove_sql_summary_duplicates, trace_metadata
+from src.utils import (
+    async_timer,
+    exist_in_sql_summaries,
+    remove_sql_summary_duplicates,
+    trace_metadata,
+)
 from src.web.v1.services.ask_details import SQLBreakdown
 
 logger = logging.getLogger("wren-ai-service")
@@ -228,69 +232,32 @@ class AskService:
                         response=api_results,
                     )
 
-                if ask_request.history:
-                    sql_generation_tasks = [
-                        asyncio.create_task(
-                            self._pipelines["followup_sql_generation"].run(
-                                query=ask_request.query,
-                                contexts=documents,
-                                history=ask_request.history,
-                                project_id=ask_request.project_id,
-                                configurations=ask_request.configurations,
-                            )
+                failed_sql_generation_results = []
+                previous_queries = []
+                for _ in range(3):
+                    if ask_request.history:
+                        sql_generation_result = await self._pipelines[
+                            "followup_sql_generation"
+                        ].run(
+                            query=ask_request.query,
+                            contexts=documents,
+                            history=ask_request.history,
+                            project_id=ask_request.project_id,
+                            configurations=ask_request.configurations,
+                            previous_queries=previous_queries,
                         )
-                        for _ in range(3)
-                    ]
-                else:
-                    sql_generation_tasks = [
-                        asyncio.create_task(
-                            self._pipelines["sql_generation"].run(
-                                query=ask_request.query,
-                                contexts=documents,
-                                exclude=historical_question_result,
-                                project_id=ask_request.project_id,
-                                configurations=ask_request.configurations,
-                            )
+                    else:
+                        sql_generation_result = await self._pipelines[
+                            "sql_generation"
+                        ].run(
+                            query=ask_request.query,
+                            contexts=documents,
+                            exclude=historical_question_result,
+                            project_id=ask_request.project_id,
+                            configurations=ask_request.configurations,
+                            previous_queries=previous_queries,
                         )
-                        for _ in range(3)
-                    ]
-
-                # Wait for the first task to complete
-                done, pending = await asyncio.wait(
-                    sql_generation_tasks, return_when=asyncio.FIRST_COMPLETED
-                )
-
-                # Get the result of the first completed task
-                first_result = done.pop().result()
-
-                if sql_valid_results := first_result["post_process"][
-                    "valid_generation_results"
-                ]:
-                    valid_sql_summary_results = (
-                        await self._add_summary_to_sql_candidates(
-                            sql_valid_results,
-                            ask_request.query,
-                            ask_request.configurations.language,
-                        )
-                    )
-                    api_results = (
-                        api_results
-                        + [AskResult(**result) for result in valid_sql_summary_results]
-                    )[:3]
-
-                    self._ask_results[query_id] = AskResultResponse(
-                        status="generating",
-                        response=api_results,
-                    )
-
-                # Gather results from remaining tasks
-                other_results = await asyncio.gather(*pending, return_exceptions=True)
-
-                # Process other results
-                for result in other_results:
-                    if isinstance(result, Exception):
-                        continue
-                    if sql_valid_results := result["post_process"][
+                    if sql_valid_results := sql_generation_result["post_process"][
                         "valid_generation_results"
                     ]:
                         valid_sql_summary_results = (
@@ -300,35 +267,40 @@ class AskService:
                                 ask_request.configurations.language,
                             )
                         )
+
                         api_results = (
                             api_results
                             + [
                                 AskResult(**result)
                                 for result in valid_sql_summary_results
+                                if not exist_in_sql_summaries(previous_queries, result)
                             ]
                         )[:3]
+
+                        previous_queries = remove_sql_summary_duplicates(
+                            previous_queries + valid_sql_summary_results
+                        )
+
                         self._ask_results[query_id] = AskResultResponse(
                             status="generating",
                             response=api_results,
                         )
-
-                # Collect all invalid results for SQL correction
-                all_invalid_results = []
-                for result in [first_result] + other_results:
-                    if isinstance(result, dict):
-                        all_invalid_results.extend(
+                    else:
+                        failed_sql_generation_results += (
                             self._get_failed_dry_run_results(
-                                result["post_process"]["invalid_generation_results"]
+                                sql_generation_result["post_process"][
+                                    "invalid_generation_results"
+                                ]
                             )
                         )
 
                 # Perform SQL correction if there are invalid results
-                if all_invalid_results:
+                if failed_sql_generation_results:
                     sql_correction_results = await self._pipelines[
                         "sql_correction"
                     ].run(
                         contexts=documents,
-                        invalid_generation_results=all_invalid_results,
+                        invalid_generation_results=failed_sql_generation_results,
                         project_id=ask_request.project_id,
                     )
                     if valid_generation_results := sql_correction_results[
@@ -346,10 +318,10 @@ class AskService:
                             + [
                                 AskResult(**result)
                                 for result in valid_sql_summary_results
+                                if not exist_in_sql_summaries(previous_queries, result)
                             ]
                         )[:3]
 
-                print(f"api_results: {api_results}")
                 if api_results:
                     self._ask_results[query_id] = AskResultResponse(
                         status="finished",

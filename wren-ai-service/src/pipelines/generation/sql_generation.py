@@ -28,36 +28,7 @@ logger = logging.getLogger("wren-ai-service")
 
 sql_generation_user_prompt_template = """
 ### TASK ###
-Given a user query that is ambiguous in nature, your task is to interpret the query in various plausible ways and
-generate SQL statement that could potentially answer user's question.
-
-### EXAMPLES ###
-Consider the structure of a generic database which includes common tables like users, orders, products, and transactions.
-Here are the ambiguous user queries:
-
-1. "Find the records of recent high-value transactions."
-2. "Show me popular items that are not selling well."
-3. "Retrieve user feedback on products from last month."
-
-For each query, start by explaining the different ways the query can be interpreted. Then, provide SQL queries corresponding to each interpretation.
-Your SQL statements should include SELECT statements, appropriate WHERE clauses to filter the results, and JOINs if necessary to combine information from different tables.
-Remember to include ordering and limit clauses where relevant to address the 'recent', 'high-value', 'popular', and 'last month' aspects of the queries.
-
-Example for the first query:
-
-Interpretation 1: Recent high-value transactions are defined as transactions that occurred in the last 30 days with a value greater than $10,000.
-SQL Query 1: SELECT * FROM "transactions" WHERE "transaction_date" >= NOW() - INTERVAL '30 days' AND "value" > 10000 ORDER BY "transaction_date" DESC;
-SUMMARY 1: Recent high-value transactions.
-
-Interpretation 2: High-value transactions are those in the top "10%" of all transactions in terms of value, and 'recent' is defined as the last 3 months.
-SQL Query 2: WITH "ranked_transactions" AS (SELECT *, NTILE(10) OVER (ORDER BY "value" DESC) AS "percentile_rank" FROM "transactions" WHERE "transaction_date" >= NOW() - INTERVAL '3 months') SELECT * FROM "ranked_transactions" WHERE "percentile_rank" = 1 ORDER BY "transaction_date" DESC;
-SUMMARY 2: Top 10% transactions last 3 months.
-
-Interpretation 3: 'Recent' refers to the last week, and 'high-value' transactions are those above the average transaction value of the past week.
-SQL Query 3: SELECT * FROM "transactions" WHERE "transaction_date" >= NOW() - INTERVAL '7 days' AND "value" > (SELECT AVG("value") FROM "transactions" WHERE "transaction_date" >= NOW() - INTERVAL '7 days') ORDER BY "transaction_date" DESC;
-SUMMARY 3: Above-average transactions last week.
-
-Proceed in a similar manner for the other queries.
+Given user's question, please answer one SQL statement that best answers user's question.
 
 ### DATABASE SCHEMA ###
 {% for document in documents %}
@@ -81,9 +52,7 @@ Ensure that the following excluded statements are not used in the generated quer
 The final answer must be the JSON format like following:
 
 {
-    "results": [
-        {"sql": <SQL_QUERY_STRING>}
-    ]
+    "sql": <SQL_QUERY_STRING>
 }
 
 {% if samples %}
@@ -96,10 +65,21 @@ SQL:
 {% endfor %}
 {% endif %}
 
+{% if previous_queries %}
+### Previous Queries ###
+{% for query in previous_queries %}
+SQL Query:
+{{query.sql}}
+SQL Summary:
+{{query.summary}}
+{% endfor %}
+{% endif %}
+
 ### QUESTION ###
 User's Question: {{ query }}
 Current Time: {{ current_time }}
 
+If previous queries are given, you need to give one different SQL statement that can also answer user's question in different angles.
 Let's think step by step.
 """
 
@@ -115,6 +95,7 @@ def prompt(
     prompt_builder: PromptBuilder,
     configurations: AskConfigurations | None = None,
     samples: List[Dict] | None = None,
+    previous_queries: List[Dict] | None = None,
 ) -> dict:
     logger.debug(f"query: {query}")
     logger.debug(f"documents: {documents}")
@@ -132,6 +113,7 @@ def prompt(
         instructions=construct_instructions(configurations),
         samples=samples,
         current_time=datetime.now(),
+        previous_queries=previous_queries,
     )
 
 
@@ -156,12 +138,8 @@ async def post_process(
 
 
 ## End of Pipeline
-class SQLResult(BaseModel):
+class GenerationResult(BaseModel):
     sql: str
-
-
-class GenerationResults(BaseModel):
-    results: list[SQLResult]
 
 
 SQL_GENERATION_MODEL_KWARGS = {
@@ -169,7 +147,7 @@ SQL_GENERATION_MODEL_KWARGS = {
         "type": "json_schema",
         "json_schema": {
             "name": "sql_results",
-            "schema": GenerationResults.model_json_schema(),
+            "schema": GenerationResult.model_json_schema(),
         },
     }
 }
@@ -208,6 +186,7 @@ class SQLGeneration(BasicPipeline):
         exclude: List[Dict],
         samples: List[Dict] | None = None,
         project_id: str | None = None,
+        previous_queries: List[Dict] | None = None,
         configurations: AskConfigurations | None = None,
     ) -> None:
         destination = "outputs/pipelines/generation"
@@ -224,6 +203,7 @@ class SQLGeneration(BasicPipeline):
                 "samples": samples,
                 "project_id": project_id,
                 "configurations": configurations,
+                "previous_queries": previous_queries,
                 **self._components,
                 **self._configs,
             },
@@ -240,6 +220,7 @@ class SQLGeneration(BasicPipeline):
         exclude: List[Dict],
         samples: List[Dict] | None = None,
         project_id: str | None = None,
+        previous_queries: List[Dict] | None = None,
         configurations: AskConfigurations | None = None,
     ):
         logger.info("SQL Generation pipeline is running...")
@@ -252,6 +233,7 @@ class SQLGeneration(BasicPipeline):
                 "samples": samples,
                 "project_id": project_id,
                 "configurations": configurations,
+                "previous_queries": previous_queries,
                 **self._components,
                 **self._configs,
             },

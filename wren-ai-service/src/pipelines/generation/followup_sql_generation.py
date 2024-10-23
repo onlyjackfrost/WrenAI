@@ -28,8 +28,9 @@ logger = logging.getLogger("wren-ai-service")
 
 text_to_sql_with_followup_user_prompt_template = """
 ### TASK ###
-Given the following user's follow-up question and previous SQL query and summary,
+Given the following user's follow-up question and last question's SQL query and summary,
 generate one SQL query in order to interpret the user's question in various plausible ways.
+Also given previous SQL queries and summaries, you need to generate one different SQL statement that answers user's question in different angles.
 
 ### DATABASE SCHEMA ###
 {% for document in documents %}
@@ -93,16 +94,25 @@ The final answer must be the JSON format like following:
 }
 
 {{ alert }}
-
-### QUESTION ###
-Previous SQL Summary: {{ history.summary }}
-Previous SQL Query: {{ history.sql }}
-User's Follow-up Question: {{ query }}
-Current Time: {{ current_time }}
-
 {% if instructions %}
 Instructions: {{ instructions }}
 {% endif %}
+
+{% if previous_queries %}
+### Previous Queries ###
+{% for query in previous_queries %}
+SQL Query:
+{{query.sql}}
+SQL Summary:
+{{query.summary}}
+{% endfor %}
+{% endif %}
+
+### QUESTION ###
+SQL Summary of Previous Question: {{ history.summary }}
+SQL Query of Previous Question: {{ history.sql }}
+User's Follow-up Question: {{ query }}
+Current Time: {{ current_time }}
 
 Let's think step by step.
 """

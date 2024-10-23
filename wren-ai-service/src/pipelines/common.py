@@ -117,7 +117,9 @@ class SQLGenPostProcessor:
         try:
             cleaned_generation_result = orjson.loads(
                 clean_generation_result(replies[0])
-            )["results"]
+            )
+            if "results" in cleaned_generation_result:
+                cleaned_generation_result = cleaned_generation_result["results"]
 
             if isinstance(cleaned_generation_result, dict):
                 cleaned_generation_result = [cleaned_generation_result]

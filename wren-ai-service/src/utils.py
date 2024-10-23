@@ -207,3 +207,16 @@ def remove_sql_summary_duplicates(dicts):
             seen.add(identifier)
             unique_dicts.append(d)
     return unique_dicts
+
+
+def exist_in_sql_summaries(dicts, candidate):
+    seen = set()
+    for d in dicts:
+        identifier = (
+            d["sql"],
+            d["summary"],
+        )  # This assumes 'sql' and 'summary' always exist
+        if identifier not in seen:
+            seen.add(identifier)
+
+    return (candidate["sql"], candidate["summary"]) in seen
