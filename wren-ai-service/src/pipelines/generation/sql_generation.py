@@ -28,7 +28,9 @@ logger = logging.getLogger("wren-ai-service")
 
 sql_generation_user_prompt_template = """
 ### TASK ###
-Given user's question, please answer one SQL statement that best answers user's question.
+If previous queries are not given, give one SQL statement that best answers user's question. 
+If previous queries are given, give one SQL statement that is unique and different from all SQLs in previous queries,
+in order to try to answer user's question in different angles.
 
 ### DATABASE SCHEMA ###
 {% for document in documents %}
@@ -79,7 +81,6 @@ SQL Summary:
 User's Question: {{ query }}
 Current Time: {{ current_time }}
 
-If previous queries are given, you need to give one different SQL statement that can also answer user's question in different angles.
 Let's think step by step.
 """
 

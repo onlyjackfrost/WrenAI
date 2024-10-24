@@ -1,6 +1,8 @@
 import ast
+import asyncio
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -232,9 +234,9 @@ def construct_db_schemas(dbschema_retrieval: list[Document]) -> list[dict]:
 
 @timer
 @observe(capture_input=False)
-def prompt(
+def prompts(
     query: str, construct_db_schemas: list[dict], prompt_builder: PromptBuilder
-) -> dict:
+) -> list[dict]:
     logger.info(f"db_schemas: {construct_db_schemas}")
 
     db_schemas = [
@@ -242,16 +244,43 @@ def prompt(
         for construct_db_schema in construct_db_schemas
     ]
 
-    return prompt_builder.run(question=query, db_schemas=db_schemas)
+    # Group the db_schemas into 3 groups
+    group_size = len(db_schemas) // 3
+    db_schema_groups = [
+        db_schemas[i : i + group_size] for i in range(0, len(db_schemas), group_size)
+    ]
+
+    return [
+        prompt_builder.run(question=query, db_schemas=db_schema_group)
+        for db_schema_group in db_schema_groups
+    ]
 
 
 @async_timer
 @observe(as_type="generation", capture_input=False)
 async def filter_columns_in_tables(
-    prompt: dict, table_columns_selection_generator: Any
+    prompts: list[dict], table_columns_selection_generator: Any
 ) -> dict:
-    logger.debug(f"prompt: {prompt}")
-    return await table_columns_selection_generator.run(prompt=prompt.get("prompt"))
+    logger.debug(f"prompts: {prompts}")
+
+    async def _filter_columns_in_tables(prompt):
+        return await table_columns_selection_generator.run(prompt=prompt.get("prompt"))
+
+    a = time.time()
+    results = await asyncio.gather(
+        *[_filter_columns_in_tables(prompt) for prompt in prompts]
+    )
+    b = time.time()
+
+    print(f"spent: {b-a}")
+
+    # Combine results from all subgroups
+    _results = []
+    for result in results:
+        _results += orjson.loads(result["replies"][0])["results"]
+    combined_results = {"replies": _results}
+
+    return combined_results
 
 
 @timer
@@ -261,9 +290,7 @@ def construct_retrieval_results(
     construct_db_schemas: list[dict],
     dbschema_retrieval: list[Document],
 ) -> list[str]:
-    columns_and_tables_needed = orjson.loads(filter_columns_in_tables["replies"][0])[
-        "results"
-    ]
+    columns_and_tables_needed = filter_columns_in_tables["replies"]
     logger.info(f"columns_and_tables_needed: {columns_and_tables_needed}")
 
     # we need to change the below code to match the new schema of structured output
@@ -334,7 +361,7 @@ class Retrieval(BasicPipeline):
         llm_provider: LLMProvider,
         embedder_provider: EmbedderProvider,
         document_store_provider: DocumentStoreProvider,
-        table_retrieval_size: Optional[int] = 10,
+        table_retrieval_size: Optional[int] = 9,
         table_column_retrieval_size: Optional[int] = 1000,
         **kwargs,
     ):

@@ -29,8 +29,9 @@ logger = logging.getLogger("wren-ai-service")
 text_to_sql_with_followup_user_prompt_template = """
 ### TASK ###
 Given the following user's follow-up question and last question's SQL query and summary,
-generate one SQL query in order to interpret the user's question in various plausible ways.
-Also given previous SQL queries and summaries, you need to generate one different SQL statement that answers user's question in different angles.
+If previous queries are not given, generate one SQL query in order to interpret the user's question in various plausible ways.
+If previous queries are given, generate one SQL statement that is unique and different from all SQLs in previous queries,
+in order to try to answer user's question in different angles .
 
 ### DATABASE SCHEMA ###
 {% for document in documents %}
