@@ -1,5 +1,4 @@
 import ast
-import asyncio
 import logging
 import sys
 from pathlib import Path
@@ -33,7 +32,6 @@ The database schema includes tables, columns, primary keys, foreign keys, relati
 4. If a "." is included in columns, put the name before the first dot into chosen columns.
 5. The number of columns chosen must match the number of reasoning.
 6. Final chosen columns must be only column names, don't prefix it with table names.
-7. If no tables should be included, simply return the empty list.
 
 ### FINAL ANSWER FORMAT ###
 Please provide your response as a JSON object, structured as follows:
@@ -234,9 +232,9 @@ def construct_db_schemas(dbschema_retrieval: list[Document]) -> list[dict]:
 
 @timer
 @observe(capture_input=False)
-def prompts(
+def prompt(
     query: str, construct_db_schemas: list[dict], prompt_builder: PromptBuilder
-) -> list[dict]:
+) -> dict:
     logger.info(f"db_schemas: {construct_db_schemas}")
 
     db_schemas = [
@@ -244,39 +242,17 @@ def prompts(
         for construct_db_schema in construct_db_schemas
     ]
 
-    # Group the db_schemas into 3 groups
-    group_size = len(db_schemas) // 3
-    db_schema_groups = [
-        db_schemas[i : i + group_size] for i in range(0, len(db_schemas), group_size)
-    ]
-
-    return [
-        prompt_builder.run(question=query, db_schemas=db_schema_group)
-        for db_schema_group in db_schema_groups
-    ]
+    return prompt_builder.run(question=query, db_schemas=db_schemas)
 
 
 @async_timer
 @observe(as_type="generation", capture_input=False)
 async def filter_columns_in_tables(
-    prompts: list[dict], table_columns_selection_generator: Any
+    prompt: dict, table_columns_selection_generator: Any
 ) -> dict:
-    logger.debug(f"prompts: {prompts}")
+    logger.debug(f"prompt: {prompt}")
 
-    async def _filter_columns_in_tables(prompt):
-        return await table_columns_selection_generator.run(prompt=prompt.get("prompt"))
-
-    results = await asyncio.gather(
-        *[_filter_columns_in_tables(prompt) for prompt in prompts]
-    )
-
-    # Combine results from all subgroups
-    _results = []
-    for result in results:
-        _results += orjson.loads(result["replies"][0])["results"]
-    combined_results = {"replies": _results}
-
-    return combined_results
+    return await table_columns_selection_generator.run(prompt=prompt.get("prompt"))
 
 
 @timer
@@ -286,7 +262,9 @@ def construct_retrieval_results(
     construct_db_schemas: list[dict],
     dbschema_retrieval: list[Document],
 ) -> list[str]:
-    columns_and_tables_needed = filter_columns_in_tables["replies"]
+    columns_and_tables_needed = orjson.loads(filter_columns_in_tables["replies"][0])[
+        "results"
+    ]
     logger.info(f"columns_and_tables_needed: {columns_and_tables_needed}")
 
     # we need to change the below code to match the new schema of structured output
