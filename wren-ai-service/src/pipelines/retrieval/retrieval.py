@@ -2,7 +2,6 @@ import ast
 import asyncio
 import logging
 import sys
-import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -34,6 +33,7 @@ The database schema includes tables, columns, primary keys, foreign keys, relati
 4. If a "." is included in columns, put the name before the first dot into chosen columns.
 5. The number of columns chosen must match the number of reasoning.
 6. Final chosen columns must be only column names, don't prefix it with table names.
+7. If no tables should be included, simply return the empty list.
 
 ### FINAL ANSWER FORMAT ###
 Please provide your response as a JSON object, structured as follows:
@@ -266,13 +266,9 @@ async def filter_columns_in_tables(
     async def _filter_columns_in_tables(prompt):
         return await table_columns_selection_generator.run(prompt=prompt.get("prompt"))
 
-    a = time.time()
     results = await asyncio.gather(
         *[_filter_columns_in_tables(prompt) for prompt in prompts]
     )
-    b = time.time()
-
-    print(f"spent: {b-a}")
 
     # Combine results from all subgroups
     _results = []
