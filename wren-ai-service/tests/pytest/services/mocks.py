@@ -33,6 +33,7 @@ class GenerationMock(sql_generation.SQLGeneration):
         exclude: list[dict],
         project_id: str | None = None,
         configurations: AskConfigurations | None = None,
+        previous_queries: list[dict] | None = None,
     ):
         return {
             "post_process": {
