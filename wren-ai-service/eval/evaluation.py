@@ -3,7 +3,6 @@ import sys
 from pathlib import Path
 from typing import Tuple
 
-import dotenv
 from deepeval import evaluate
 from deepeval.evaluate import TestResult
 from deepeval.test_case import LLMTestCase
@@ -14,11 +13,28 @@ sys.path.append(f"{Path().parent.resolve()}")
 import traceback
 
 import eval.pipelines as pipelines
+import src.providers as provider
+from eval import EvalSettings
 from eval.utils import parse_toml, trace_metadata
 from src import utils
 
 
 def formatter(prediction: dict, meta: dict) -> dict:
+    """
+    Formats the prediction result to be used as evaluation input.
+
+    This function takes a prediction dictionary and a meta dictionary,
+    processes them to extract relevant information, and returns a formatted
+    dictionary that serves as input for evaluation. It includes details such
+    as input, actual and expected outputs, context, and additional metadata.
+
+    Args:
+        prediction (dict): A dictionary containing prediction details.
+        meta (dict): A dictionary containing metadata information.
+
+    Returns:
+        dict: A formatted dictionary containing evaluation input data.
+    """
     retrieval_context = [str(context) for context in prediction["retrieval_context"]]
     context = [str(context) for context in prediction["context"]]
     enable_spider_metrics = "spider" in meta.get("evaluation_dataset", "").lower()
@@ -32,6 +48,7 @@ def formatter(prediction: dict, meta: dict) -> dict:
         "expected_output": prediction["expected_output"],
         "retrieval_context": retrieval_context,
         "context": context,
+        "reasoning": prediction.get("reasoning", ""),
         "additional_metadata": {
             "trace_id": prediction["trace_id"],
             "trace_url": prediction["trace_url"],
@@ -57,6 +74,12 @@ def parse_args() -> Tuple[str]:
         action=argparse.BooleanOptionalAction,
         help="Whether use the LLM(OpenAI's gpt-4o-mini) to help check semantics of sqls to improve accuracy metrics",
     )
+    parser.add_argument(
+        "--training-dataset",
+        "-T",
+        default=None,
+        help="Use the training dataset to build a dspy optimized module",
+    )
     return parser.parse_args()
 
 
@@ -75,7 +98,9 @@ class Evaluator:
 
             try:
                 test_case = LLMTestCase(**formatter(prediction, meta))
-                result = evaluate([test_case], self._metrics, ignore_errors=True)[0]
+                result = evaluate(
+                    [test_case], self._metrics, ignore_errors=True
+                ).test_results[0]
                 self._score_metrics(test_case, result)
                 [metric.collect(test_case, result) for metric in self._post_metrics]
             except Exception:
@@ -94,7 +119,7 @@ class Evaluator:
                 name=name,
                 value=score,
                 comment=metric.reason or metric.error,
-                source="eval",
+                source="EVAL",
             )
 
             if name not in self._score_collector:
@@ -105,8 +130,8 @@ class Evaluator:
     @observe(name="Summary Trace", capture_input=False, capture_output=False)
     def _average_score(self, meta: dict) -> None:
         langfuse_context.update_current_trace(
-            session_id=meta["session_id"],
-            user_id=meta["user_id"],
+            session_id=meta.get("session_id"),
+            user_id=meta.get("user_id"),
             metadata=trace_metadata(meta, type="summary"),
         )
 
@@ -136,8 +161,9 @@ class Evaluator:
 if __name__ == "__main__":
     args = parse_args()
 
-    dotenv.load_dotenv()
-    utils.load_env_vars()
+    settings = EvalSettings()
+    pipe_components = provider.generate_components(settings.components)
+    utils.init_langfuse(settings)
 
     predicted_file = parse_toml(f"outputs/predictions/{args.file}")
     meta = predicted_file["meta"]
@@ -145,11 +171,24 @@ if __name__ == "__main__":
 
     dataset = parse_toml(meta["evaluation_dataset"])
     metrics = pipelines.metrics_initiator(
-        meta["pipeline"], dataset["mdl"], args.semantics
+        meta["pipeline"], dataset, pipe_components, args.semantics
     )
 
     evaluator = Evaluator(**metrics)
     evaluator.eval(meta, predictions)
+    # if args.training_dataset:
+    #     # todo: for now comment dspy related code
+    #     optimizer_parameters["evaluator"] = evaluator
+    #     optimizer_parameters["metrics"] = metrics
+    #     optimizer_parameters["meta"] = meta
+    #     optimizer_parameters["predictions"] = predictions
+    #     configure_llm_provider(
+    #         os.getenv("GENERATION_MODEL"), os.getenv("OPENAI_API_KEY")
+    #     )
+    #     trainset, devset = prepare_dataset(args.training_dataset)
+    #     build_optimizing_module(trainset)
+    # else:
+    #     evaluator.eval(meta, predictions)
 
     langfuse_context.flush()
 

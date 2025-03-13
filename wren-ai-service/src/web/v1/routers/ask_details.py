@@ -9,7 +9,6 @@ from src.globals import (
     get_service_container,
     get_service_metadata,
 )
-
 from src.web.v1.services.ask_details import (
     AskDetailsRequest,
     AskDetailsResponse,
@@ -31,11 +30,9 @@ Endpoints:
      {
        "query": "SELECT * FROM table;",        # SQL query to be analyzed
        "sql": "SELECT * FROM table;",           # Original SQL string
-       "summary": "Summary of the query",       # Brief summary of the query
        "mdl_hash": "optional-hash",             # Optional model hash for reference
        "thread_id": "optional-thread-id",       # Optional thread identifier
        "project_id": "optional-project-id",     # Optional project identifier
-       "user_id": "optional-user-id"            # Optional user identifier
      }
    - Response: AskDetailsResponse
      {
@@ -105,4 +102,3 @@ async def get_ask_details_result(
     return service_container.ask_details_service.get_ask_details_result(
         AskDetailsResultRequest(query_id=query_id)
     )
-

@@ -1,129 +1,99 @@
+import asyncio
 import logging
 import sys
-from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-import orjson
 from hamilton import base
-from hamilton.experimental.h_async import AsyncDriver
+from hamilton.async_driver import AsyncDriver
 from haystack import Document
 from haystack.components.builders.prompt_builder import PromptBuilder
 from langfuse.decorators import observe
-from pydantic import BaseModel
 
 from src.core.engine import Engine
 from src.core.pipeline import BasicPipeline
 from src.core.provider import LLMProvider
-from src.pipelines.common import (
+from src.pipelines.generation.utils.sql import (
+    SQL_GENERATION_MODEL_KWARGS,
     TEXT_TO_SQL_RULES,
     SQLGenPostProcessor,
-    sql_generation_system_prompt,
 )
-from src.utils import async_timer, timer
 
 logger = logging.getLogger("wren-ai-service")
 
 
-sql_correction_user_prompt_template = """
-You are a Trino SQL expert with exceptional logical thinking skills and debugging skills.
-
+sql_correction_system_prompt = f"""
 ### TASK ###
-Now you are given a list of syntactically incorrect Trino SQL queries and related error messages.
-With given database schema, please think step by step to correct these wrong Trino SQL quries.
+You are an ANSI SQL expert with exceptional logical thinking skills and debugging skills.
 
+Now you are given syntactically incorrect ANSI SQL query and related error message, please generate the syntactically correct ANSI SQL query without changing original semantics.
+
+{TEXT_TO_SQL_RULES}
+
+### FINAL ANSWER FORMAT ###
+The final answer must be a corrected SQL query in JSON format:
+
+{{
+    "sql": <CORRECTED_SQL_QUERY_STRING>
+}}
+"""
+
+sql_correction_user_prompt_template = """
+{% if documents %}
 ### DATABASE SCHEMA ###
 {% for document in documents %}
     {{ document }}
 {% endfor %}
-
-### FINAL ANSWER FORMAT ###
-The final answer must be a list of corrected SQL quries and its original corresponding summary in JSON format
-
-{
-    "results": [
-        {"sql": <CORRECTED_SQL_QUERY_STRING_1>, "summary": <ORIGINAL_SUMMARY_STRING_1>},
-        {"sql": <CORRECTED_SQL_QUERY_STRING_2>, "summary": <ORIGINAL_SUMMARY_STRING_2>}
-    ]
-}
-
-{{ alert }}
+{% endif %}
 
 ### QUESTION ###
-{% for invalid_generation_result in invalid_generation_results %}
-    sql: {{ invalid_generation_result.sql }}
-    summary: {{ invalid_generation_result.summary }}
-    error: {{ invalid_generation_result.error }}
-{% endfor %}
+SQL: {{ invalid_generation_result.sql }}
+Error Message: {{ invalid_generation_result.error }}
 
 Let's think step by step.
 """
 
 
 ## Start of Pipeline
-@timer
 @observe(capture_input=False)
-def prompt(
+def prompts(
     documents: List[Document],
     invalid_generation_results: List[Dict],
-    alert: str,
     prompt_builder: PromptBuilder,
-) -> dict:
-    logger.debug(
-        f"documents: {orjson.dumps(documents, option=orjson.OPT_INDENT_2).decode()}"
-    )
-    logger.debug(
-        f"invalid_generation_results: {orjson.dumps(invalid_generation_results, option=orjson.OPT_INDENT_2).decode()}"
-    )
-    return prompt_builder.run(
-        documents=documents,
-        invalid_generation_results=invalid_generation_results,
-        alert=alert,
-    )
+) -> list[dict]:
+    return [
+        prompt_builder.run(
+            documents=documents,
+            invalid_generation_result=invalid_generation_result,
+        )
+        for invalid_generation_result in invalid_generation_results
+    ]
 
 
-@async_timer
 @observe(as_type="generation", capture_input=False)
-async def generate_sql_correction(prompt: dict, generator: Any) -> dict:
-    logger.debug(f"prompt: {orjson.dumps(prompt, option=orjson.OPT_INDENT_2).decode()}")
-    return await generator.run(prompt=prompt.get("prompt"))
+async def generate_sql_corrections(prompts: list[dict], generator: Any) -> list[dict]:
+    tasks = []
+    for prompt in prompts:
+        task = asyncio.ensure_future(generator(prompt=prompt.get("prompt")))
+        tasks.append(task)
+
+    return await asyncio.gather(*tasks)
 
 
-@async_timer
 @observe(capture_input=False)
 async def post_process(
-    generate_sql_correction: dict,
+    generate_sql_corrections: list[dict],
     post_processor: SQLGenPostProcessor,
+    engine_timeout: float,
     project_id: str | None = None,
-) -> dict:
-    logger.debug(
-        f"generate_sql_correction: {orjson.dumps(generate_sql_correction, option=orjson.OPT_INDENT_2).decode()}"
-    )
+) -> list[dict]:
     return await post_processor.run(
-        generate_sql_correction.get("replies"), project_id=project_id
+        generate_sql_corrections,
+        timeout=engine_timeout,
+        project_id=project_id,
     )
 
 
 ## End of Pipeline
-
-
-class CorrectedSQLResult(BaseModel):
-    sql: str
-    summary: str
-
-
-class CorrectedResults(BaseModel):
-    results: list[CorrectedSQLResult]
-
-
-SQL_CORRECTION_MODEL_KWARGS = {
-    "response_format": {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "corrected_sql",
-            "schema": CorrectedResults.model_json_schema(),
-        },
-    }
-}
 
 
 class SQLCorrection(BasicPipeline):
@@ -131,12 +101,13 @@ class SQLCorrection(BasicPipeline):
         self,
         llm_provider: LLMProvider,
         engine: Engine,
+        engine_timeout: Optional[float] = 30.0,
         **kwargs,
     ):
         self._components = {
             "generator": llm_provider.get_generator(
-                system_prompt=sql_generation_system_prompt,
-                generation_kwargs=SQL_CORRECTION_MODEL_KWARGS,
+                system_prompt=sql_correction_system_prompt,
+                generation_kwargs=SQL_GENERATION_MODEL_KWARGS,
             ),
             "prompt_builder": PromptBuilder(
                 template=sql_correction_user_prompt_template
@@ -145,38 +116,13 @@ class SQLCorrection(BasicPipeline):
         }
 
         self._configs = {
-            "alert": TEXT_TO_SQL_RULES,
+            "engine_timeout": engine_timeout,
         }
 
         super().__init__(
             AsyncDriver({}, sys.modules[__name__], result_builder=base.DictResult())
         )
 
-    def visualize(
-        self,
-        contexts: List[Document],
-        invalid_generation_results: List[Dict[str, str]],
-        project_id: str | None = None,
-    ) -> None:
-        destination = "outputs/pipelines/generation"
-        if not Path(destination).exists():
-            Path(destination).mkdir(parents=True, exist_ok=True)
-
-        self._pipe.visualize_execution(
-            ["post_process"],
-            output_file_path=f"{destination}/sql_correction.dot",
-            inputs={
-                "invalid_generation_results": invalid_generation_results,
-                "documents": contexts,
-                "project_id": project_id,
-                **self._components,
-                **self._configs,
-            },
-            show_legend=True,
-            orient="LR",
-        )
-
-    @async_timer
     @observe(name="SQL Correction")
     async def run(
         self,
@@ -198,23 +144,11 @@ class SQLCorrection(BasicPipeline):
 
 
 if __name__ == "__main__":
-    from langfuse.decorators import langfuse_context
+    from src.pipelines.common import dry_run_pipeline
 
-    from src.core.engine import EngineConfig
-    from src.core.pipeline import async_validate
-    from src.providers import init_providers
-    from src.utils import init_langfuse, load_env_vars
-
-    load_env_vars()
-    init_langfuse()
-
-    llm_provider, _, _, engine = init_providers(engine_config=EngineConfig())
-    pipeline = SQLCorrection(
-        llm_provider=llm_provider,
-        engine=engine,
+    dry_run_pipeline(
+        SQLCorrection,
+        "sql_correction",
+        invalid_generation_results=[],
+        contexts=[],
     )
-
-    pipeline.visualize([], [])
-    async_validate(lambda: pipeline.run([], []))
-
-    langfuse_context.flush()

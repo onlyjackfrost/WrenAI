@@ -12,14 +12,13 @@ from haystack_integrations.components.embedders.ollama import (
 from tqdm import tqdm
 
 from src.core.provider import EmbedderProvider
-from src.providers.loader import provider, pull_ollama_model
+from src.providers.loader import provider
 from src.utils import remove_trailing_slash
 
 logger = logging.getLogger("wren-ai-service")
 
 EMBEDDER_OLLAMA_URL = "http://localhost:11434"
 EMBEDDING_MODEL = "nomic-embed-text:latest"
-EMBEDDING_MODEL_DIMENSION = 768  # https://huggingface.co/nomic-ai/nomic-embed-text-v1.5
 
 
 @component
@@ -44,8 +43,6 @@ class AsyncTextEmbedder(OllamaTextEmbedder):
         text: str,
         generation_kwargs: Optional[Dict[str, Any]] = None,
     ):
-        logger.debug(f"Running Ollama text embedder with text: {text}")
-
         payload = self._create_json_payload(text, generation_kwargs)
 
         start = time.perf_counter()
@@ -131,8 +128,6 @@ class AsyncDocumentEmbedder(OllamaDocumentEmbedder):
         documents: List[str],
         generation_kwargs: Optional[Dict[str, Any]] = None,
     ):
-        logger.debug(f"Running Ollama document embedder with documents: {documents}")
-
         if (
             not isinstance(documents, list)
             or documents
@@ -163,12 +158,6 @@ class OllamaEmbedderProvider(EmbedderProvider):
         self,
         url: str = os.getenv("EMBEDDER_OLLAMA_URL") or EMBEDDER_OLLAMA_URL,
         model: str = os.getenv("EMBEDDING_MODEL") or EMBEDDING_MODEL,
-        dimension: int = (
-            int(os.getenv("EMBEDDING_MODEL_DIMENSION"))
-            if os.getenv("EMBEDDING_MODEL_DIMENSION")
-            else 0
-        )
-        or EMBEDDING_MODEL_DIMENSION,
         timeout: Optional[int] = (
             int(os.getenv("EMBEDDER_TIMEOUT")) if os.getenv("EMBEDDER_TIMEOUT") else 120
         ),
@@ -176,10 +165,7 @@ class OllamaEmbedderProvider(EmbedderProvider):
     ):
         self._url = remove_trailing_slash(url)
         self._embedding_model = model
-        self._embedding_model_dim = dimension
         self._timeout = timeout
-
-        pull_ollama_model(self._url, self._embedding_model)
 
         logger.info(f"Using Ollama Embedding Model: {self._embedding_model}")
         logger.info(f"Using Ollama URL: {self._url}")

@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import logging
 import os
@@ -28,6 +29,8 @@ class WrenUI(Engine):
         session: aiohttp.ClientSession,
         project_id: str | None = None,
         dry_run: bool = True,
+        timeout: float = 30.0,
+        limit: int = 500,
         **kwargs,
     ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         data = {
@@ -38,22 +41,44 @@ class WrenUI(Engine):
             data["dryRun"] = True
             data["limit"] = 1
         else:
-            data["limit"] = 500
+            data["limit"] = limit
 
-        async with session.post(
-            f"{self._endpoint}/api/graphql",
-            json={
-                "query": "mutation PreviewSql($data: PreviewSQLDataInput) { previewSql(data: $data) }",
-                "variables": {"data": data},
-            },
-        ) as response:
-            res = await response.json()
-            if data := res.get("data"):
-                return True, data, None
+        try:
+            async with session.post(
+                f"{self._endpoint}/api/graphql",
+                json={
+                    "query": "mutation PreviewSql($data: PreviewSQLDataInput) { previewSql(data: $data) }",
+                    "variables": {"data": data},
+                },
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as response:
+                res = await response.json()
+                if data := res.get("data"):
+                    data = data.get("previewSql", {}) if data else {}
+                    return (
+                        True,
+                        data,
+                        {
+                            "correlation_id": res.get("correlationId"),
+                        },
+                    )
+                return (
+                    False,
+                    None,
+                    {
+                        "error_message": res.get("errors", [{}])[0].get(
+                            "message", "Unknown error"
+                        ),
+                        "correlation_id": res.get("extensions", {})
+                        .get("other", {})
+                        .get("correlationId"),
+                    },
+                )
+        except asyncio.TimeoutError:
             return (
                 False,
                 None,
-                res.get("errors", [{}])[0].get("message", "Unknown error"),
+                {"error_message": f"Request timed out: {timeout} seconds"},
             )
 
 
@@ -80,33 +105,50 @@ class WrenIbis(Engine):
         sql: str,
         session: aiohttp.ClientSession,
         dry_run: bool = True,
+        timeout: float = 30.0,
+        limit: int = 500,
         **kwargs,
     ) -> Tuple[bool, Optional[Dict[str, Any]]]:
         api_endpoint = f"{self._endpoint}/v2/connector/{self._source}/query"
         if dry_run:
             api_endpoint += "?dryRun=true&limit=1"
         else:
-            api_endpoint += "?limit=500"
+            api_endpoint += f"?limit={limit}"
 
-        async with session.post(
-            api_endpoint,
-            json={
-                "sql": remove_limit_statement(sql),
-                "manifestStr": self._manifest,
-                "connectionInfo": self._connection_info,
-            },
-        ) as response:
-            if dry_run:
-                res = await response.text()
-            else:
-                res = await response.json()
+        try:
+            async with session.post(
+                api_endpoint,
+                json={
+                    "sql": remove_limit_statement(sql),
+                    "manifestStr": self._manifest,
+                    "connectionInfo": self._connection_info,
+                },
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as response:
+                if dry_run:
+                    res = await response.text()
+                else:
+                    res = await response.json()
 
-            if response.status == 204:
-                return True, None, None
-            if response.status == 200:
-                return True, res, None
+                if response.status == 200 or response.status == 204:
+                    return (
+                        True,
+                        res,
+                        {
+                            "correlation_id": "",
+                        },
+                    )
 
-            return False, None, res
+                return (
+                    False,
+                    None,
+                    {
+                        "error_message": res,
+                        "correlation_id": "",
+                    },
+                )
+        except asyncio.TimeoutError:
+            return False, None, f"Request timed out: {timeout} seconds"
 
 
 @provider("wren_engine")
@@ -114,19 +156,20 @@ class WrenEngine(Engine):
     def __init__(
         self,
         endpoint: str = os.getenv("WREN_ENGINE_ENDPOINT"),
+        manifest: str = os.getenv("WREN_ENGINE_MANIFEST"),
         **_,
     ):
         self._endpoint = endpoint
+        self._manifest = manifest
         logger.info("Using Engine: wren_engine")
 
     async def execute_sql(
         self,
         sql: str,
         session: aiohttp.ClientSession,
-        properties: Dict[str, Any] = {
-            "manifest": os.getenv("WREN_ENGINE_MANIFEST"),
-        },
         dry_run: bool = True,
+        timeout: float = 30.0,
+        limit: int = 500,
         **kwargs,
     ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
         api_endpoint = (
@@ -135,18 +178,39 @@ class WrenEngine(Engine):
             else f"{self._endpoint}/v1/mdl/preview"
         )
 
-        async with session.get(
-            api_endpoint,
-            json={
-                "manifest": orjson.loads(base64.b64decode(properties.get("manifest")))
-                if properties.get("manifest")
-                else {},
-                "sql": remove_limit_statement(sql),
-                "limit": 1 if dry_run else 500,
-            },
-        ) as response:
-            res = await response.json()
-            if response.status == 200:
-                return True, res, None
+        try:
+            async with session.get(
+                api_endpoint,
+                json={
+                    "manifest": orjson.loads(base64.b64decode(self._manifest))
+                    if self._manifest
+                    else {},
+                    "sql": remove_limit_statement(sql),
+                    "limit": 1 if dry_run else limit,
+                },
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as response:
+                if dry_run:
+                    res = await response.text()
+                else:
+                    res = await response.json()
 
-            return False, None, res
+                if response.status == 200:
+                    return (
+                        True,
+                        res,
+                        {
+                            "correlation_id": "",
+                        },
+                    )
+
+                return (
+                    False,
+                    None,
+                    {
+                        "error_message": res,
+                        "correlation_id": "",
+                    },
+                )
+        except asyncio.TimeoutError:
+            return False, None, f"Request timed out: {timeout} seconds"

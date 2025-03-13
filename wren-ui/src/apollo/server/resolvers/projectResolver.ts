@@ -63,6 +63,8 @@ export class ProjectResolver {
     this.triggerDataSourceDetection =
       this.triggerDataSourceDetection.bind(this);
     this.getSchemaChange = this.getSchemaChange.bind(this);
+    this.getProjectRecommendationQuestions =
+      this.getProjectRecommendationQuestions.bind(this);
   }
 
   public async getSettings(_root: any, _arg: any, ctx: IContext) {
@@ -85,6 +87,14 @@ export class ProjectResolver {
     };
   }
 
+  public async getProjectRecommendationQuestions(
+    _root: any,
+    _arg: any,
+    ctx: IContext,
+  ) {
+    return ctx.projectService.getProjectRecommendationQuestions();
+  }
+
   public async updateCurrentProject(
     _root: any,
     arg: { data: { language: string } },
@@ -95,6 +105,11 @@ export class ProjectResolver {
     await ctx.projectRepository.updateOne(project.id, {
       language,
     });
+
+    // only generating for user's data source
+    if (project.sampleDataset === null) {
+      await ctx.projectService.generateProjectRecommendationQuestions();
+    }
     return true;
   }
 
@@ -256,7 +271,13 @@ export class ProjectResolver {
       type,
       connectionInfo,
     } as ProjectData);
-    logger.debug(`Project created `);
+    logger.debug(`Project created.`);
+
+    // init dashboard
+    logger.debug('Dashboard init...');
+    await ctx.dashboardService.initDashboard();
+    logger.debug('Dashboard created.');
+
     const eventName = TelemetryEvent.CONNECTION_SAVE_DATA_SOURCE;
     const eventProperties = {
       dataSourceType: type,
@@ -606,9 +627,15 @@ export class ProjectResolver {
   }
 
   private async deploy(ctx: IContext) {
-    const { id } = await ctx.projectService.getCurrentProject();
+    const project = await ctx.projectService.getCurrentProject();
     const { manifest } = await ctx.mdlService.makeCurrentModelMDL();
-    return await ctx.deployService.deploy(manifest, id);
+    const deployRes = await ctx.deployService.deploy(manifest, project.id);
+
+    // only generating for user's data source
+    if (project.sampleDataset === null) {
+      await ctx.projectService.generateProjectRecommendationQuestions();
+    }
+    return deployRes;
   }
 
   private buildRelationInput(

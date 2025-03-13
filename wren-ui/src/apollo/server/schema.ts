@@ -11,6 +11,7 @@ export const typeDefs = gql`
     MSSQL
     CLICK_HOUSE
     TRINO
+    SNOWFLAKE
   }
 
   enum ExpressionName {
@@ -535,10 +536,36 @@ export const typeDefs = gql`
   enum AskingTaskStatus {
     UNDERSTANDING
     SEARCHING
+    PLANNING
+    GENERATING
+    CORRECTING
+    FINISHED
+    FAILED
+    STOPPED
+  }
+
+  enum AskingTaskType {
+    GENERAL
+    TEXT_TO_SQL
+    MISLEADING_QUERY
+  }
+
+  enum ChartTaskStatus {
+    FETCHING
     GENERATING
     FINISHED
     FAILED
     STOPPED
+  }
+
+  enum ChartType {
+    BAR
+    PIE
+    LINE
+    MULTI_LINE
+    AREA
+    GROUPED_BAR
+    STACKED_BAR
   }
 
   enum ResultCandidateType {
@@ -549,28 +576,50 @@ export const typeDefs = gql`
   type ResultCandidate {
     type: ResultCandidateType!
     sql: String!
-    summary: String!
     view: ViewInfo
   }
 
   type AskingTask {
     status: AskingTaskStatus!
+    type: AskingTaskType
     error: Error
     candidates: [ResultCandidate!]!
+    intentReasoning: String
+  }
+
+  input InstantRecommendedQuestionsInput {
+    previousQuestions: [String!]
+  }
+
+  enum RecommendedQuestionsTaskStatus {
+    NOT_STARTED
+    GENERATING
+    FINISHED
+    FAILED
+  }
+
+  type ResultQuestion {
+    question: String!
+    category: String!
+    sql: String!
+  }
+
+  type RecommendedQuestionsTask {
+    status: RecommendedQuestionsTaskStatus!
+    questions: [ResultQuestion!]!
+    error: Error
   }
 
   # Thread
   input CreateThreadInput {
     question: String
     sql: String
-    summary: String
     viewId: Int
   }
 
   input CreateThreadResponseInput {
     question: String
     sql: String
-    summary: String
     viewId: Int
   }
 
@@ -580,6 +629,15 @@ export const typeDefs = gql`
 
   input UpdateThreadInput {
     summary: String
+  }
+
+  input AdjustThreadResponseChartInput {
+    chartType: ChartType!
+    xAxis: String
+    yAxis: String
+    xOffset: String
+    color: String
+    theta: String
   }
 
   input PreviewDataInput {
@@ -597,40 +655,62 @@ export const typeDefs = gql`
     cteName: String
   }
 
-  type ThreadResponseDetail {
-    view: ViewInfo
-    sql: String
+  enum ThreadResponseAnswerStatus {
+    NOT_STARTED
+    FETCHING_DATA
+    PREPROCESSING
+    STREAMING
+    FINISHED
+    FAILED
+    INTERRUPTED
+  }
+
+  type ThreadResponseAnswerDetail {
+    queryId: String
+    status: ThreadResponseAnswerStatus
+    error: Error
+    numRowsUsedInLLM: Int
+    content: String
+  }
+
+  type ThreadResponseBreakdownDetail {
+    queryId: String
+    status: AskingTaskStatus!
+    error: Error
     description: String
-    steps: [DetailStep!]!
+    steps: [DetailStep!]
+  }
+
+  type ThreadResponseChartDetail {
+    queryId: String
+    status: ChartTaskStatus!
+    error: Error
+    description: String
+    chartType: ChartType
+    chartSchema: JSON
+    adjustment: Boolean
   }
 
   type ThreadResponse {
     id: Int!
+    threadId: Int!
     question: String!
-    summary: String!
-    status: AskingTaskStatus!
-    detail: ThreadResponseDetail
-    error: Error
+    sql: String!
+    view: ViewInfo
+    breakdownDetail: ThreadResponseBreakdownDetail
+    answerDetail: ThreadResponseAnswerDetail
+    chartDetail: ThreadResponseChartDetail
   }
 
   # Thread only consists of basic information of a thread
   type Thread {
     id: Int!
-    sql: String!
-      @deprecated(
-        reason: "Doesn't seem to be reasonable to put a sql in a thread"
-      )
     summary: String!
   }
 
   # Detailed thread consists of thread and thread responses
   type DetailedThread {
     id: Int!
-    sql: String!
-      @deprecated(
-        reason: "Doesn't seem to be reasonable to put a sql in a thread"
-      )
-    summary: String!
     responses: [ThreadResponse!]!
   }
 
@@ -707,6 +787,103 @@ export const typeDefs = gql`
     type: SchemaChangeType!
   }
 
+  # Learning
+  type LearningRecord {
+    paths: [String!]!
+  }
+
+  input SaveLearningRecordInput {
+    path: String!
+  }
+
+  # Dashboard
+  enum DashboardItemType {
+    BAR
+    PIE
+    LINE
+    MULTI_LINE
+    AREA
+    GROUPED_BAR
+    STACKED_BAR
+    TABLE
+    NUMBER
+  }
+
+  input DashboardItemWhereInput {
+    id: Int!
+  }
+
+  input CreateDashboardItemInput {
+    itemType: DashboardItemType!
+    responseId: Int!
+  }
+
+  input ItemLayoutInput {
+    itemId: Int!
+    x: Int!
+    y: Int!
+    w: Int!
+    h: Int!
+  }
+
+  input UpdateDashboardItemLayoutsInput {
+    layouts: [ItemLayoutInput!]!
+  }
+
+  input DeleteDashboardItemInput {
+    itemId: Int!
+  }
+
+  input PreviewItemSQLInput {
+    itemId: Int!
+    limit: Int
+  }
+
+  type DashboardItemLayout {
+    x: Int!
+    y: Int!
+    w: Int!
+    h: Int!
+  }
+
+  type DashboardItemDetail {
+    sql: String!
+    chartSchema: JSON
+  }
+
+  type DashboardItem {
+    id: Int!
+    dashboardId: Int!
+    type: DashboardItemType!
+    layout: DashboardItemLayout!
+    detail: DashboardItemDetail!
+  }
+
+  type SqlPair {
+    id: Int!
+    projectId: Int!
+    sql: String!
+    question: String!
+  }
+
+  input CreateSqlPairInput {
+    sql: String!
+    question: String!
+  }
+
+  input UpdateSqlPairInput {
+    sql: String
+    question: String
+  }
+
+  input SqlPairWhereUniqueInput {
+    id: Int!
+  }
+
+  input GenerateQuestionInput {
+    sql: String!
+  }
+
   # Query and Mutation
   type Query {
     # On Boarding Steps
@@ -738,6 +915,20 @@ export const typeDefs = gql`
 
     # System
     getMDL(hash: String!): GetMDLResult!
+
+    # Learning
+    learningRecord: LearningRecord!
+
+    # Recommendation questions
+    getThreadRecommendationQuestions(threadId: Int!): RecommendedQuestionsTask!
+    getProjectRecommendationQuestions: RecommendedQuestionsTask!
+    instantRecommendedQuestions(taskId: String!): RecommendedQuestionsTask!
+
+    # Dashboard
+    dashboardItems: [DashboardItem!]!
+
+    # SQL Pairs
+    sqlPairs: [SqlPair]!
   }
 
   type Mutation {
@@ -806,6 +997,22 @@ export const typeDefs = gql`
       data: CreateThreadResponseInput!
     ): ThreadResponse!
     previewData(where: PreviewDataInput!): JSON!
+    previewBreakdownData(where: PreviewDataInput!): JSON!
+
+    # Generate Thread Response Breakdown
+    generateThreadResponseBreakdown(responseId: Int!): ThreadResponse!
+
+    # Generate Thread Response Answer
+    generateThreadResponseAnswer(responseId: Int!): ThreadResponse!
+
+    # Generate Thread Response Chart
+    generateThreadResponseChart(responseId: Int!): ThreadResponse!
+
+    # Adjust Thread Response Chart
+    adjustThreadResponseChart(
+      responseId: Int!
+      data: AdjustThreadResponseChartInput!
+    ): ThreadResponse!
 
     # Settings
     resetCurrentProject: Boolean!
@@ -814,5 +1021,32 @@ export const typeDefs = gql`
 
     # preview
     previewSql(data: PreviewSQLDataInput): JSON!
+
+    # Learning
+    saveLearningRecord(data: SaveLearningRecordInput!): LearningRecord!
+
+    # Recommendation questions
+    generateThreadRecommendationQuestions(threadId: Int!): Boolean!
+    generateProjectRecommendationQuestions: Boolean!
+    createInstantRecommendedQuestions(
+      data: InstantRecommendedQuestionsInput!
+    ): Task!
+
+    # Dashboard
+    updateDashboardItemLayouts(
+      data: UpdateDashboardItemLayoutsInput!
+    ): [DashboardItem!]!
+    createDashboardItem(data: CreateDashboardItemInput!): DashboardItem!
+    deleteDashboardItem(where: DashboardItemWhereInput!): Boolean!
+    previewItemSQL(data: PreviewItemSQLInput!): JSON!
+
+    # SQL Pairs
+    createSqlPair(data: CreateSqlPairInput!): SqlPair!
+    updateSqlPair(
+      where: SqlPairWhereUniqueInput!
+      data: UpdateSqlPairInput!
+    ): SqlPair!
+    deleteSqlPair(where: SqlPairWhereUniqueInput!): Boolean!
+    generateQuestion(data: GenerateQuestionInput!): String!
   }
 `;

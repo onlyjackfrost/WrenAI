@@ -31,12 +31,11 @@ Endpoints:
    - Request body: SqlExpansionRequest
      {
        "query_id": "unique-query-id",           # Unique identifier for the query
-       "query": "SELECT * FROM table;",         # SQL query to be expanded
+       "query": "user's quest to modify sql result",
        "history": { ... },                       # Historical context for the query
        "project_id": "project-identifier",      # Identifier for the project
        "mdl_hash": "hash-of-model",              # Hash of the model (if applicable)
        "thread_id": "thread-identifier",        # Identifier for the thread (if applicable)
-       "user_id": "user-identifier"             # Identifier for the user making the request
      }
    - Response: SqlExpansionResponse
      {
@@ -89,13 +88,13 @@ Note: The actual SQL expansion is performed in the background using FastAPI's Ba
 
 @router.post("/sql-expansions")
 async def sql_expansion(
-    sql_expansion_request: SqlExpansionRequest,
+    request: SqlExpansionRequest,
     background_tasks: BackgroundTasks,
     service_container: ServiceContainer = Depends(get_service_container),
     service_metadata: ServiceMetadata = Depends(get_service_metadata),
 ) -> SqlExpansionResponse:
     query_id = str(uuid.uuid4())
-    sql_expansion_request.query_id = query_id
+    request.query_id = query_id
     service_container.sql_expansion_service._sql_expansion_results[
         query_id
     ] = SqlExpansionResultResponse(
@@ -104,7 +103,7 @@ async def sql_expansion(
 
     background_tasks.add_task(
         service_container.sql_expansion_service.sql_expansion,
-        sql_expansion_request,
+        request,
         service_metadata=asdict(service_metadata),
     )
     return SqlExpansionResponse(query_id=query_id)

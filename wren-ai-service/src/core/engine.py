@@ -35,6 +35,7 @@ def clean_generation_result(result: str) -> str:
         _normalize_whitespace(result)
         .replace("\\n", " ")
         .replace("```sql", "")
+        .replace("```json", "")
         .replace('"""', "")
         .replace("'''", "")
         .replace("```", "")
@@ -49,16 +50,14 @@ def remove_limit_statement(sql: str) -> str:
     return modified_sql
 
 
-def add_quotes(sql: str) -> Tuple[str, bool]:
+def add_quotes(sql: str) -> Tuple[str, str]:
     try:
-        logger.debug(f"Original SQL: {sql}")
-
-        quoted_sql = sqlglot.transpile(sql, read="trino", identify=True)[0]
-
-        logger.debug(f"Quoted SQL: {quoted_sql}")
+        quoted_sql = sqlglot.transpile(
+            sql, read="trino", identify=True, error_level=sqlglot.ErrorLevel.RAISE
+        )[0]
     except Exception as e:
         logger.exception(f"Error in sqlglot.transpile to {sql}: {e}")
 
-        return "", False
+        return "", str(e)
 
-    return quoted_sql, True
+    return quoted_sql, ""

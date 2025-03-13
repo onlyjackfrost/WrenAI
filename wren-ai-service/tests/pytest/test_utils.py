@@ -26,7 +26,7 @@ def _mock(mocker: MockFixture) -> tuple:
         return_value="mock-embedding-model",
     )
     mocker.patch(
-        "src.core.provider.EmbedderProvider.get_dimensions",
+        "src.core.provider.EmbedderProvider.get_model_dimension",
         return_value=768,
     )
 
@@ -49,7 +49,6 @@ def test_service_metadata(service_metadata: ServiceMetadata):
             "llm_model": "mock-llm-model",
             "llm_model_kwargs": {},
             "embedding_model": "mock-embedding-model",
-            "embedding_model_dim": 768,
         },
     }
 
@@ -65,7 +64,7 @@ def test_trace_metadata(service_metadata: ServiceMetadata, mocker: MockFixture):
         project_id = "mock-project-id"
         thread_id = "mock-thread-id"
         mdl_hash = "mock-mdl-hash"
-        user_id = "mock-user-id"
+        query = "mock-user-query"
 
     @utils.trace_metadata
     async def my_function(_: str, b: Request, **kwargs):
@@ -74,12 +73,13 @@ def test_trace_metadata(service_metadata: ServiceMetadata, mocker: MockFixture):
     asyncio.run(my_function("", Request(), service_metadata=asdict(service_metadata)))
 
     function.assert_called_once_with(
-        user_id="mock-user-id",
+        user_id=None,
         session_id="mock-thread-id",
         release=service_metadata.service_version,
         metadata={
             "mdl_hash": "mock-mdl-hash",
             "project_id": "mock-project-id",
+            "query": "mock-user-query",
             **service_metadata.pipes_metadata,
         },
     )

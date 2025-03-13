@@ -3,11 +3,12 @@ import { WrenService } from '../telemetry/telemetry';
 
 export enum GeneralErrorCodes {
   INTERNAL_SERVER_ERROR = 'INTERNAL_SERVER_ERROR',
-
   // AI service errors
-  MISLEADING_QUERY = 'MISLEADING_QUERY',
   NO_RELEVANT_DATA = 'NO_RELEVANT_DATA',
   NO_RELEVANT_SQL = 'NO_RELEVANT_SQL',
+  RESOURCE_NOT_FOUND = 'RESOURCE_NOT_FOUND',
+  MDL_PARSE_ERROR = 'MDL_PARSE_ERROR',
+  NO_CHART = 'NO_CHART',
 
   // Exception error for AI service (e.g., network connection error)
   AI_SERVICE_UNDEFINED_ERROR = 'OTHERS',
@@ -34,18 +35,23 @@ export enum GeneralErrorCodes {
   // dry run error
   DRY_RUN_ERROR = 'DRY_RUN_ERROR',
   DRY_PLAN_ERROR = 'DRY_PLAN_ERROR',
+
+  // deploy sql pair error
+  DEPLOY_SQL_PAIR_ERROR = 'DEPLOY_SQL_PAIR_ERROR',
+  GENERATE_QUESTIONS_ERROR = 'GENERATE_QUESTIONS_ERROR',
+  INVALID_SQL_ERROR = 'INVALID_SQL_ERROR',
 }
 
 export const errorMessages = {
   [GeneralErrorCodes.INTERNAL_SERVER_ERROR]: 'Internal server error',
 
   // AI service errors
-  [GeneralErrorCodes.MISLEADING_QUERY]:
-    'The query provided is misleading and may not yield accurate results. Please refine your query.',
   [GeneralErrorCodes.NO_RELEVANT_DATA]:
-    'No relevant data found for the given query. Please try a different query.',
+    'I can’t find the exact data you’re looking for, but feel free to ask about other available topics.',
   [GeneralErrorCodes.NO_RELEVANT_SQL]:
-    'No relevant SQL found for the given query. Please check your query and try again.',
+    "Could you please provide more details or specify the information you're seeking?",
+  [GeneralErrorCodes.NO_CHART]:
+    'The chart couldn’t be generated this time. Please try regenerating the chart or rephrasing your question for better results.',
 
   // Connector errors
   [GeneralErrorCodes.CONNECTION_ERROR]: 'Can not connect to data source',
@@ -75,13 +81,19 @@ export const errorMessages = {
   // dry run error
   [GeneralErrorCodes.DRY_RUN_ERROR]: 'Dry run sql statement error',
   [GeneralErrorCodes.DRY_PLAN_ERROR]: 'Dry plan error',
+
+  // deploy sql pair error
+  [GeneralErrorCodes.DEPLOY_SQL_PAIR_ERROR]: 'Deploy sql pair error',
+  [GeneralErrorCodes.GENERATE_QUESTIONS_ERROR]: 'Generate questions error',
+  [GeneralErrorCodes.INVALID_SQL_ERROR]:
+    'Invalid SQL, please check your SQL syntax',
 };
 
 export const shortMessages = {
   [GeneralErrorCodes.INTERNAL_SERVER_ERROR]: 'Internal server error',
-  [GeneralErrorCodes.MISLEADING_QUERY]: 'Misleading query',
-  [GeneralErrorCodes.NO_RELEVANT_DATA]: 'No relevant data',
-  [GeneralErrorCodes.NO_RELEVANT_SQL]: 'No relevant SQL',
+  [GeneralErrorCodes.NO_RELEVANT_DATA]: 'Try a different query',
+  [GeneralErrorCodes.NO_RELEVANT_SQL]: 'Clarification needed',
+  [GeneralErrorCodes.NO_CHART]: 'Chart not available',
   [GeneralErrorCodes.CONNECTION_ERROR]: 'Failed to connect',
   [GeneralErrorCodes.IBIS_SERVER_ERROR]: 'Data connection error',
   [GeneralErrorCodes.INIT_SQL_ERROR]: 'Invalid initializing SQL',
@@ -93,6 +105,10 @@ export const shortMessages = {
   [GeneralErrorCodes.INVALID_VIEW_CREATION]: 'Invalid view creation',
   [GeneralErrorCodes.DRY_RUN_ERROR]: 'Dry run sql statement error',
   [GeneralErrorCodes.DRY_PLAN_ERROR]: 'Dry plan error',
+  [GeneralErrorCodes.DEPLOY_SQL_PAIR_ERROR]: 'Deploy sql pair error',
+  [GeneralErrorCodes.GENERATE_QUESTIONS_ERROR]: 'Generate questions error',
+  [GeneralErrorCodes.INVALID_SQL_ERROR]:
+    'Invalid SQL, please check your SQL syntax',
 };
 
 export const create = (
@@ -101,6 +117,7 @@ export const create = (
     customMessage?: string;
     originalError?: Error;
     service?: WrenService;
+    other?: any;
   },
 ): GraphQLError => {
   const { customMessage, originalError, service } = options || {};
@@ -124,6 +141,7 @@ export const create = (
       shortMessage:
         shortMessages[code] ||
         shortMessages[GeneralErrorCodes.INTERNAL_SERVER_ERROR],
+      other: options?.other,
     },
   });
 

@@ -6,11 +6,9 @@ import uuid
 import orjson
 import pytest
 
-from src.core.engine import EngineConfig
-from src.pipelines.generation import sql_correction, sql_generation
-from src.pipelines.indexing import indexing
-from src.pipelines.retrieval import historical_question, retrieval
-from src.providers import init_providers
+from src.config import settings
+from src.pipelines import generation, indexing, retrieval
+from src.providers import generate_components
 from src.web.v1.services.ask import (
     AskRequest,
     AskResultRequest,
@@ -24,6 +22,7 @@ from src.web.v1.services.semantics_preparation import (
 from tests.pytest.services.mocks import (
     GenerationMock,
     HistoricalQuestionMock,
+    IntentClassificationMock,
     RetrievalMock,
     SQLSummaryMock,
 )
@@ -31,28 +30,27 @@ from tests.pytest.services.mocks import (
 
 @pytest.fixture
 def ask_service():
-    llm_provider, embedder_provider, document_store_provider, engine = init_providers(
-        EngineConfig()
-    )
+    pipe_components = generate_components(settings.components)
 
     return AskService(
         {
+            "intent_classification": generation.IntentClassification(
+                **pipe_components["intent_classification"],
+            ),
+            "data_assistance": generation.DataAssistance(
+                **pipe_components["data_assistance"],
+            ),
             "retrieval": retrieval.Retrieval(
-                llm_provider=llm_provider,
-                embedder_provider=embedder_provider,
-                document_store_provider=document_store_provider,
+                **pipe_components["db_schema_retrieval"],
             ),
-            "historical_question": historical_question.HistoricalQuestion(
-                embedder_provider=embedder_provider,
-                document_store_provider=document_store_provider,
+            "historical_question": retrieval.HistoricalQuestionRetrieval(
+                **pipe_components["historical_question_retrieval"],
             ),
-            "sql_generation": sql_generation.SQLGeneration(
-                llm_provider=llm_provider,
-                engine=engine,
+            "sql_generation": generation.SQLGeneration(
+                **pipe_components["sql_generation"],
             ),
-            "sql_correction": sql_correction.SQLCorrection(
-                llm_provider=llm_provider,
-                engine=engine,
+            "sql_correction": generation.SQLCorrection(
+                **pipe_components["sql_correction"],
             ),
         }
     )
@@ -60,13 +58,18 @@ def ask_service():
 
 @pytest.fixture
 def indexing_service():
-    _, embedder_provider, document_store_provider, _ = init_providers(EngineConfig())
+    pipe_components = generate_components(settings.components)
 
     return SemanticsPreparationService(
         {
-            "indexing": indexing.Indexing(
-                embedder_provider=embedder_provider,
-                document_store_provider=document_store_provider,
+            "db_schema": indexing.DBSchema(
+                **pipe_components["db_schema_indexing"],
+            ),
+            "historical_question": indexing.HistoricalQuestion(
+                **pipe_components["historical_question_indexing"],
+            ),
+            "table_description": indexing.TableDescription(
+                **pipe_components["table_description_indexing"],
             ),
         }
     )
@@ -149,6 +152,8 @@ async def test_ask_with_successful_query(
 def _ask_service_ttl_mock(query: str):
     return AskService(
         {
+            "intent_classification": IntentClassificationMock(),
+            "data_assistance": "",
             "retrieval": RetrievalMock(
                 [
                     f"mock document 1 for {query}",
@@ -157,7 +162,7 @@ def _ask_service_ttl_mock(query: str):
             ),
             "historical_question": HistoricalQuestionMock(),
             "sql_generation": GenerationMock(
-                valid=["select count(*) from books"],
+                valid=[{"sql": "select count(*) from books"}],
             ),
             "sql_summary": SQLSummaryMock(
                 results=[

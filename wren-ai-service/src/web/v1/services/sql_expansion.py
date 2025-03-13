@@ -6,7 +6,8 @@ from langfuse.decorators import observe
 from pydantic import BaseModel
 
 from src.core.pipeline import BasicPipeline
-from src.utils import async_timer, remove_sql_summary_duplicates, trace_metadata
+from src.utils import trace_metadata
+from src.web.v1.services import Configuration
 from src.web.v1.services.ask import AskError, AskHistory
 from src.web.v1.services.ask_details import SQLBreakdown
 
@@ -14,10 +15,6 @@ logger = logging.getLogger("wren-ai-service")
 
 
 # POST /v1/sql-expansions
-class SqlExpansionConfigurations(BaseModel):
-    language: str = "English"
-
-
 class SqlExpansionRequest(BaseModel):
     _query_id: str | None = None
     query: str
@@ -26,10 +23,7 @@ class SqlExpansionRequest(BaseModel):
     project_id: Optional[str] = None
     mdl_hash: Optional[str] = None
     thread_id: Optional[str] = None
-    user_id: Optional[str] = None
-    configurations: SqlExpansionConfigurations = SqlExpansionConfigurations(
-        language="English"
-    )
+    configurations: Optional[Configuration] = Configuration()
 
     @property
     def query_id(self) -> str:
@@ -77,7 +71,7 @@ class SqlExpansionResultResponse(BaseModel):
     ]
     response: Optional[SqlExpansionResult] = None
     error: Optional[AskError] = None
-
+    trace_id: Optional[str] = None
 
 class SqlExpansionService:
     def __init__(
@@ -99,19 +93,14 @@ class SqlExpansionService:
 
         return False
 
-    def _get_failed_dry_run_results(self, invalid_generation_results: list[dict]):
-        return list(
-            filter(lambda x: x["type"] == "DRY_RUN", invalid_generation_results)
-        )
-
-    @async_timer
     @observe(name="SQL Expansion")
     @trace_metadata
     async def sql_expansion(
         self,
-        sql_expansion_request: SqlExpansionRequest,
+        request: SqlExpansionRequest,
         **kwargs,
     ):
+        trace_id = kwargs.get("trace_id")
         results = {
             "sql_expansion_result": {},
             "metadata": {
@@ -119,34 +108,36 @@ class SqlExpansionService:
                 "error_message": "",
             },
         }
+        error_message = ""
 
         try:
-            query_id = sql_expansion_request.query_id
+            query_id = request.query_id
 
             if not self._is_stopped(query_id):
                 self._sql_expansion_results[query_id] = SqlExpansionResultResponse(
                     status="understanding",
+                    trace_id=trace_id,
                 )
 
             if not self._is_stopped(query_id):
                 self._sql_expansion_results[query_id] = SqlExpansionResultResponse(
                     status="searching",
+                    trace_id=trace_id,
                 )
 
-                query_for_retrieval = (
-                    sql_expansion_request.history.summary
-                    + " "
-                    + sql_expansion_request.query
-                )
+                query_for_retrieval = request.query
                 retrieval_result = await self._pipelines["retrieval"].run(
                     query=query_for_retrieval,
-                    id=sql_expansion_request.project_id,
+                    id=request.project_id,
                 )
-                documents = retrieval_result.get("construct_retrieval_results", [])
+                _retrieval_result = retrieval_result.get(
+                    "construct_retrieval_results", {}
+                )
+                documents = _retrieval_result.get("retrieval_results", [])
 
                 if not documents:
                     logger.exception(
-                        f"sql expansion pipeline - NO_RELEVANT_DATA: {sql_expansion_request.query}"
+                        f"sql expansion pipeline - NO_RELEVANT_DATA: {request.query}"
                     )
                     self._sql_expansion_results[query_id] = SqlExpansionResultResponse(
                         status="failed",
@@ -154,6 +145,7 @@ class SqlExpansionService:
                             code="NO_RELEVANT_DATA",
                             message="No relevant data",
                         ),
+                        trace_id=trace_id,
                     )
                     results["metadata"]["error_type"] = "NO_RELEVANT_DATA"
                     return results
@@ -161,15 +153,17 @@ class SqlExpansionService:
             if not self._is_stopped(query_id):
                 self._sql_expansion_results[query_id] = SqlExpansionResultResponse(
                     status="generating",
+                    trace_id=trace_id,
                 )
 
                 sql_expansion_generation_results = await self._pipelines[
                     "sql_expansion"
                 ].run(
-                    query=sql_expansion_request.query,
+                    query=request.query,
                     contexts=documents,
-                    history=sql_expansion_request.history,
-                    project_id=sql_expansion_request.project_id,
+                    history=request.history,
+                    project_id=request.project_id,
+                    configuration=request.configurations,
                 )
 
                 valid_generation_results = []
@@ -178,56 +172,61 @@ class SqlExpansionService:
                 ]["valid_generation_results"]:
                     valid_generation_results += sql_valid_results
 
-                if failed_dry_run_results := self._get_failed_dry_run_results(
-                    sql_expansion_generation_results["post_process"][
-                        "invalid_generation_results"
-                    ]
-                ):
-                    sql_correction_results = await self._pipelines[
-                        "sql_correction"
-                    ].run(
-                        contexts=documents,
-                        invalid_generation_results=failed_dry_run_results,
-                        project_id=sql_expansion_request.project_id,
-                    )
-                    valid_generation_results += sql_correction_results["post_process"][
-                        "valid_generation_results"
-                    ]
+                if failed_dry_run_results := sql_expansion_generation_results[
+                    "post_process"
+                ]["invalid_generation_results"]:
+                    if failed_dry_run_results[0]["type"] != "TIME_OUT":
+                        sql_correction_results = await self._pipelines[
+                            "sql_correction"
+                        ].run(
+                            contexts=documents,
+                            invalid_generation_results=failed_dry_run_results,
+                            project_id=request.project_id,
+                        )
+                        if sql_correction_valid_results := sql_correction_results[
+                            "post_process"
+                        ]["valid_generation_results"]:
+                            valid_generation_results += sql_correction_valid_results
+                        elif failed_dry_run_results := sql_correction_results[
+                            "post_process"
+                        ]["invalid_generation_results"]:
+                            error_message = failed_dry_run_results[0]["error"]
+                    else:
+                        error_message = failed_dry_run_results[0]["error"]
 
                 valid_sql_summary_results = []
                 if valid_generation_results:
                     sql_summary_results = await self._pipelines["sql_summary"].run(
-                        query=sql_expansion_request.query,
-                        sqls=valid_generation_results,
-                        language=sql_expansion_request.configurations.language,
+                        query=request.query,
+                        sqls=[result.get("sql") for result in valid_generation_results],
+                        language=request.configurations.language,
                     )
                     valid_sql_summary_results = sql_summary_results["post_process"][
                         "sql_summary_results"
                     ]
-                    # remove duplicates of valid_sql_summary_results, which consists of a sql and a summary
-                    valid_sql_summary_results = remove_sql_summary_duplicates(
-                        valid_sql_summary_results
-                    )
 
                 if not valid_sql_summary_results:
                     logger.exception(
-                        f"sql expansion pipeline - NO_RELEVANT_SQL: {sql_expansion_request.query}"
+                        f"sql expansion pipeline - NO_RELEVANT_SQL: {request.query}"
                     )
                     self._sql_expansion_results[query_id] = SqlExpansionResultResponse(
                         status="failed",
                         error=AskError(
                             code="NO_RELEVANT_SQL",
-                            message="No relevant SQL",
+                            message=error_message or "No relevant SQL",
                         ),
+                        trace_id=trace_id,
                     )
                     results["metadata"]["error_type"] = "NO_RELEVANT_SQL"
+                    results["metadata"]["error_message"] = error_message
                     return results
 
                 api_results = SqlExpansionResultResponse.SqlExpansionResult(
-                    description=sql_expansion_request.history.summary,
+                    # at the moment, we skip the description, since no description is generated in ai pipelines
+                    description="",
                     steps=[
                         {
-                            "sql": valid_generation_results[0]["sql"],
+                            "sql": valid_sql_summary_results[0]["sql"],
                             "summary": valid_sql_summary_results[0]["summary"],
                             "cte_name": "",
                         }
@@ -237,6 +236,7 @@ class SqlExpansionService:
                 self._sql_expansion_results[query_id] = SqlExpansionResultResponse(
                     status="finished",
                     response=api_results,
+                    trace_id=trace_id,
                 )
 
                 results["sql_expansion_result"] = api_results
@@ -245,13 +245,14 @@ class SqlExpansionService:
             logger.exception(f"sql expansion pipeline - OTHERS: {e}")
 
             self._sql_expansion_results[
-                sql_expansion_request.query_id
+                request.query_id
             ] = SqlExpansionResultResponse(
                 status="failed",
                 error=AskError(
                     code="OTHERS",
                     message=str(e),
                 ),
+                trace_id=trace_id,
             )
 
             results["metadata"]["error_type"] = "OTHERS"

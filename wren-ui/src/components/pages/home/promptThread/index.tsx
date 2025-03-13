@@ -1,16 +1,43 @@
-import { useEffect, useRef } from 'react';
-import { Alert, Divider } from 'antd';
+import { useRouter } from 'next/router';
+import { useEffect, useMemo, useRef } from 'react';
+import { Divider } from 'antd';
 import styled from 'styled-components';
 import AnswerResult from './AnswerResult';
-import { makeIterable } from '@/utils/iteration';
+import { makeIterable, IterableComponent } from '@/utils/iteration';
+import { getAnswerIsFinished } from '@/components/pages/home/promptThread/TextBasedAnswer';
 import {
-  AskingTaskStatus,
+  AdjustThreadResponseChartInput,
   DetailedThread,
+  RecommendedQuestionsTask,
+  ThreadResponse,
 } from '@/apollo/client/graphql/__types__';
+import { SelectQuestionProps } from '@/components/pages/home/RecommendedQuestions';
+
+export interface RecommendedQuestionsProps {
+  data: RecommendedQuestionsTask;
+  show: boolean;
+  onSelect: ({ question, sql }: SelectQuestionProps) => void;
+}
 
 interface Props {
-  data: DetailedThread;
+  data: {
+    thread: DetailedThread;
+    recommendedQuestions: RecommendedQuestionsTask;
+    showRecommendedQuestions: boolean;
+  };
   onOpenSaveAsViewModal: (data: { sql: string; responseId: number }) => void;
+  onSelect: ({ question, sql }: SelectQuestionProps) => void;
+  onRegenerateTextBasedAnswer: (responseId: number) => void;
+  onGenerateBreakdownAnswer: (responseId: number) => void;
+  onGenerateChartAnswer: (responseId: number) => Promise<void>;
+  onAdjustChartAnswer: (
+    responseId: number,
+    data: AdjustThreadResponseChartInput,
+  ) => Promise<void>;
+  onOpenSaveToKnowledgeModal: (
+    data: { sql: string; question: string },
+    payload: { isCreateMode: boolean },
+  ) => void;
 }
 
 const StyledPromptThread = styled.div`
@@ -30,48 +57,65 @@ const StyledPromptThread = styled.div`
   button {
     vertical-align: middle;
   }
+
+  .promptThread-answer {
+    opacity: 0;
+    animation: fade-in 0.6s ease-out forwards;
+  }
 `;
 
-const AnswerResultTemplate = ({
-  index,
-  id,
-  status,
-  question,
-  detail,
-  error,
-  onOpenSaveAsViewModal,
-  onTriggerScrollToBottom,
+const AnswerResultTemplate: React.FC<
+  IterableComponent<ThreadResponse> &
+    Pick<
+      Props,
+      | 'onOpenSaveAsViewModal'
+      | 'onRegenerateTextBasedAnswer'
+      | 'onGenerateBreakdownAnswer'
+      | 'onGenerateChartAnswer'
+      | 'onAdjustChartAnswer'
+      | 'onOpenSaveToKnowledgeModal'
+    > & {
+      motion: boolean;
+      onInitPreviewDone: () => void;
+      recommendedQuestionsProps: RecommendedQuestionsProps;
+    }
+> = ({
   data,
-  summary,
+  index,
+  motion,
+  recommendedQuestionsProps,
+  onOpenSaveAsViewModal,
+  onInitPreviewDone,
+  onGenerateBreakdownAnswer,
+  onRegenerateTextBasedAnswer,
+  onGenerateChartAnswer,
+  onAdjustChartAnswer,
+  onOpenSaveToKnowledgeModal,
+  ...threadResponse
 }) => {
+  const { id } = threadResponse;
   const lastResponseId = data[data.length - 1].id;
   const isLastThreadResponse = id === lastResponseId;
 
   return (
-    <div key={`${id}-${index}`}>
+    <div
+      key={`${id}-${index}`}
+      data-guideid={isLastThreadResponse ? `last-answer-result` : undefined}
+    >
       {index > 0 && <Divider />}
-      {error ? (
-        <Alert
-          message={error.shortMessage}
-          description={error.message}
-          type="error"
-          showIcon
-        />
-      ) : (
-        <AnswerResult
-          answerResultSteps={detail?.steps}
-          description={detail?.description}
-          loading={status !== AskingTaskStatus.FINISHED}
-          question={question}
-          summary={summary}
-          view={detail?.view}
-          fullSql={detail?.sql}
-          threadResponseId={id}
-          onOpenSaveAsViewModal={onOpenSaveAsViewModal}
-          onTriggerScrollToBottom={onTriggerScrollToBottom}
-          isLastThreadResponse={isLastThreadResponse}
-        />
-      )}
+      <AnswerResult
+        motion={motion}
+        isLastThreadResponse={isLastThreadResponse}
+        onOpenSaveAsViewModal={onOpenSaveAsViewModal}
+        onInitPreviewDone={onInitPreviewDone}
+        threadResponse={threadResponse}
+        recommendedQuestionsProps={recommendedQuestionsProps}
+        onGenerateBreakdownAnswer={onGenerateBreakdownAnswer}
+        onRegenerateTextBasedAnswer={onRegenerateTextBasedAnswer}
+        onGenerateChartAnswer={onGenerateChartAnswer}
+        onAdjustChartAnswer={onAdjustChartAnswer}
+        onOpenSaveToKnowledgeModal={onOpenSaveToKnowledgeModal}
+      />
     </div>
   );
 };
@@ -79,37 +123,78 @@ const AnswerResultTemplate = ({
 const AnswerResultIterator = makeIterable(AnswerResultTemplate);
 
 export default function PromptThread(props: Props) {
-  const { data, onOpenSaveAsViewModal } = props;
+  const router = useRouter();
   const divRef = useRef<HTMLDivElement>(null);
+  const motionResponsesRef = useRef<Record<number, boolean>>({});
+  const { data, onSelect, ...restProps } = props;
 
-  const triggerScrollToBottom = () => {
-    const contentLayout = divRef.current.parentElement;
-    const lastChild = divRef.current.lastElementChild as HTMLElement;
-    const lastChildElement = lastChild.lastElementChild as HTMLElement;
+  const responses = useMemo(
+    () =>
+      (data.thread?.responses || []).map((response) => ({
+        ...response,
+        motion: motionResponsesRef.current[response.id],
+      })),
+    [data.thread?.responses],
+  );
 
-    if (
-      contentLayout.clientHeight <
-      lastChild.offsetTop + lastChild.clientHeight
-    ) {
+  const triggerScrollToBottom = (behavior?: ScrollBehavior) => {
+    if ((data.thread?.responses || []).length <= 1) return;
+    const contentLayout = divRef.current?.parentElement;
+    const allElements = (divRef.current?.querySelectorAll(
+      '.adm-answer-result',
+    ) || []) as HTMLElement[];
+    const lastAnswerResult = allElements[allElements.length - 1];
+
+    const dividerSpace = 48;
+    if (contentLayout && lastAnswerResult) {
       contentLayout.scrollTo({
-        top: lastChildElement.offsetTop,
-        behavior: 'smooth',
+        top: lastAnswerResult.offsetTop - dividerSpace,
+        behavior,
       });
     }
   };
 
   useEffect(() => {
-    if (divRef.current && data?.responses.length > 0) {
-      triggerScrollToBottom();
+    // reset to top when thread page changes
+    const contentLayout = divRef.current?.parentElement;
+    if (contentLayout) contentLayout.scrollTo({ top: 0 });
+  }, [router.query]);
+
+  useEffect(() => {
+    motionResponsesRef.current = (data.thread?.responses || []).reduce(
+      (result, item) => {
+        result[item.id] = !getAnswerIsFinished(item?.answerDetail?.status);
+        return result;
+      },
+      {},
+    );
+
+    if (
+      data.thread?.responses?.length >
+      Object.keys(motionResponsesRef.current).length
+    ) {
+      const lastResponseMotion = Object.values(
+        motionResponsesRef.current,
+      ).pop();
+      triggerScrollToBottom(lastResponseMotion ? 'smooth' : 'auto');
     }
-  }, [divRef, data]);
+  }, [data.thread?.responses]);
+
+  const onInitPreviewDone = () => {
+    triggerScrollToBottom();
+  };
 
   return (
     <StyledPromptThread className="mt-12" ref={divRef}>
       <AnswerResultIterator
-        data={data?.responses || []}
-        onOpenSaveAsViewModal={onOpenSaveAsViewModal}
-        onTriggerScrollToBottom={triggerScrollToBottom}
+        {...restProps}
+        data={responses}
+        onInitPreviewDone={onInitPreviewDone}
+        recommendedQuestionsProps={{
+          data: data.recommendedQuestions,
+          show: data.showRecommendedQuestions,
+          onSelect,
+        }}
       />
     </StyledPromptThread>
   );

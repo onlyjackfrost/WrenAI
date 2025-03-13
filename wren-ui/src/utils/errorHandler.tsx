@@ -7,6 +7,7 @@ import { message } from 'antd';
 export const ERROR_CODES = {
   INVALID_CALCULATED_FIELD: 'INVALID_CALCULATED_FIELD',
   CONNECTION_REFUSED: 'CONNECTION_REFUSED',
+  NO_CHART: 'NO_CHART',
 };
 
 /**
@@ -106,6 +107,24 @@ class CreateThreadResponseErrorHandler extends ErrorHandler {
     switch (error.extensions?.code) {
       default:
         return 'Failed to create thread response.';
+    }
+  }
+}
+
+class GenerateThreadResponseAnswerErrorHandler extends ErrorHandler {
+  public getErrorMessage(error: GraphQLError) {
+    switch (error.extensions?.code) {
+      default:
+        return 'Failed to generate thread response answer.';
+    }
+  }
+}
+
+class GenerateThreadResponseBreakdownErrorHandler extends ErrorHandler {
+  public getErrorMessage(error: GraphQLError) {
+    switch (error.extensions?.code) {
+      default:
+        return 'Failed to generate thread response breakdown SQL answer.';
     }
   }
 }
@@ -248,6 +267,60 @@ class ResolveSchemaChangeErrorHandler extends ErrorHandler {
   }
 }
 
+class CreateDashboardItemErrorHandler extends ErrorHandler {
+  public getErrorMessage(error: GraphQLError) {
+    switch (error.extensions?.code) {
+      default:
+        return 'Failed to create dashboard item.';
+    }
+  }
+}
+
+class UpdateDashboardItemLayoutsErrorHandler extends ErrorHandler {
+  public getErrorMessage(error: GraphQLError) {
+    switch (error.extensions?.code) {
+      default:
+        return 'Failed to update dashboard item layouts.';
+    }
+  }
+}
+
+class DeleteDashboardItemErrorHandler extends ErrorHandler {
+  public getErrorMessage(error: GraphQLError) {
+    switch (error.extensions?.code) {
+      default:
+        return 'Failed to delete dashboard item.';
+    }
+  }
+}
+
+class CreateSqlPairErrorHandler extends ErrorHandler {
+  public getErrorMessage(error: GraphQLError) {
+    switch (error.extensions?.code) {
+      default:
+        return 'Failed to create question-sql pair.';
+    }
+  }
+}
+
+class UpdateSqlPairErrorHandler extends ErrorHandler {
+  public getErrorMessage(error: GraphQLError) {
+    switch (error.extensions?.code) {
+      default:
+        return 'Failed to update question-sql pair.';
+    }
+  }
+}
+
+class DeleteSqlPairErrorHandler extends ErrorHandler {
+  public getErrorMessage(error: GraphQLError) {
+    switch (error.extensions?.code) {
+      default:
+        return 'Failed to delete question-sql pair.';
+    }
+  }
+}
+
 errorHandlers.set('SaveTables', new SaveTablesErrorHandler());
 errorHandlers.set('SaveRelations', new SaveRelationsErrorHandler());
 errorHandlers.set('CreateAskingTask', new CreateAskingTaskErrorHandler());
@@ -258,6 +331,16 @@ errorHandlers.set(
   'CreateThreadResponse',
   new CreateThreadResponseErrorHandler(),
 );
+
+errorHandlers.set(
+  'GenerateThreadResponseAnswer',
+  new GenerateThreadResponseAnswerErrorHandler(),
+);
+errorHandlers.set(
+  'GenerateThreadResponseBreakdown',
+  new GenerateThreadResponseBreakdownErrorHandler(),
+);
+
 errorHandlers.set('CreateView', new CreateViewErrorHandler());
 errorHandlers.set('UpdateDataSource', new UpdateDataSourceErrorHandler());
 errorHandlers.set('CreateModel', new CreateModelErrorHandler());
@@ -289,6 +372,19 @@ errorHandlers.set(
   new TriggerDataSourceDetectionErrorHandler(),
 );
 errorHandlers.set('ResolveSchemaChange', new ResolveSchemaChangeErrorHandler());
+
+// Dashboard
+errorHandlers.set('CreateDashboardItem', new CreateDashboardItemErrorHandler());
+errorHandlers.set(
+  'UpdateDashboardItemLayouts',
+  new UpdateDashboardItemLayoutsErrorHandler(),
+);
+errorHandlers.set('DeleteDashboardItem', new DeleteDashboardItemErrorHandler());
+
+// SQL Pair
+errorHandlers.set('CreateSqlPair', new CreateSqlPairErrorHandler());
+errorHandlers.set('UpdateSqlPair', new UpdateSqlPairErrorHandler());
+errorHandlers.set('DeleteSqlPair', new DeleteSqlPairErrorHandler());
 
 const errorHandler = (error: ErrorResponse) => {
   // networkError

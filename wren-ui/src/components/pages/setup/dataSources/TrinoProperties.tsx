@@ -1,6 +1,7 @@
 import { Form, Input, Switch } from 'antd';
 import { ERROR_TEXTS } from '@/utils/error';
 import { FORM_MODE } from '@/utils/enum';
+import { hostValidator } from '@/utils/validator';
 
 interface Props {
   mode?: FORM_MODE;
@@ -30,7 +31,7 @@ export default function TrinoProperties({ mode }: Props) {
         rules={[
           {
             required: true,
-            message: ERROR_TEXTS.CONNECTION.HOST.REQUIRED,
+            validator: hostValidator,
           },
         ]}
       >
@@ -50,30 +51,17 @@ export default function TrinoProperties({ mode }: Props) {
         <Input disabled={isEditMode} />
       </Form.Item>
       <Form.Item
-        label="Catalog"
-        name="catalog"
+        label="Schemas"
+        name="schemas"
         required
         rules={[
           {
             required: true,
-            message: ERROR_TEXTS.CONNECTION.CATALOG.REQUIRED,
+            message: ERROR_TEXTS.CONNECTION.SCHEMAS.REQUIRED,
           },
         ]}
       >
-        <Input />
-      </Form.Item>
-      <Form.Item
-        label="Schema"
-        name="schema"
-        required
-        rules={[
-          {
-            required: true,
-            message: ERROR_TEXTS.CONNECTION.SCHEMA.REQUIRED,
-          },
-        ]}
-      >
-        <Input />
+        <Input placeholder="catalog.schema1, catalog.schema2" />
       </Form.Item>
       <Form.Item
         label="Username"
@@ -99,7 +87,7 @@ export default function TrinoProperties({ mode }: Props) {
           },
         ]}
       >
-        <Input placeholder="Input password" />
+        <Input.Password placeholder="Input password" />
       </Form.Item>
       <Form.Item label="Use SSL" name="ssl" valuePropName="checked">
         <Switch />

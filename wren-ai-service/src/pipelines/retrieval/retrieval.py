@@ -1,12 +1,12 @@
 import ast
 import logging
 import sys
-from pathlib import Path
 from typing import Any, Optional
 
 import orjson
+import tiktoken
 from hamilton import base
-from hamilton.experimental.h_async import AsyncDriver
+from hamilton.async_driver import AsyncDriver
 from haystack import Document
 from haystack.components.builders.prompt_builder import PromptBuilder
 from langfuse.decorators import observe
@@ -14,7 +14,8 @@ from pydantic import BaseModel
 
 from src.core.pipeline import BasicPipeline
 from src.core.provider import DocumentStoreProvider, EmbedderProvider, LLMProvider
-from src.utils import async_timer, timer
+from src.pipelines.common import build_table_ddl
+from src.web.v1.services.ask import AskHistory
 
 logger = logging.getLogger("wren-ai-service")
 
@@ -32,6 +33,7 @@ The database schema includes tables, columns, primary keys, foreign keys, relati
 4. If a "." is included in columns, put the name before the first dot into chosen columns.
 5. The number of columns chosen must match the number of reasoning.
 6. Final chosen columns must be only column names, don't prefix it with table names.
+7. If the chosen column is a child column of a STRUCT type column, choose the parent column instead of the child column.
 
 ### FINAL ANSWER FORMAT ###
 Please provide your response as a JSON object, structured as follows:
@@ -92,30 +94,6 @@ table_columns_selection_user_prompt_template = """
 """
 
 
-def _build_table_ddl(
-    content: dict, columns: Optional[set[str]] = None, tables: Optional[set[str]] = None
-) -> str:
-    columns_ddl = []
-    for column in content["columns"]:
-        if column["type"] == "COLUMN":
-            if not columns or (columns and column["name"] in columns):
-                column_ddl = (
-                    f"{column['comment']}{column['name']} {column['data_type']}"
-                )
-                if column["is_primary_key"]:
-                    column_ddl += " PRIMARY KEY"
-                columns_ddl.append(column_ddl)
-        elif column["type"] == "FOREIGN_KEY":
-            if not tables or (tables and set(column["tables"]).issubset(tables)):
-                columns_ddl.append(f"{column['comment']}{column['constraint']}")
-
-    return (
-        f"{content['comment']}CREATE TABLE {content['name']} (\n  "
-        + ",\n  ".join(columns_ddl)
-        + "\n);"
-    )
-
-
 def _build_metric_ddl(content: dict) -> str:
     columns_ddl = [
         f"{column['comment']}{column['name']} {column['data_type']}"
@@ -136,16 +114,29 @@ def _build_view_ddl(content: dict) -> str:
 
 
 ## Start of Pipeline
-@async_timer
 @observe(capture_input=False, capture_output=False)
-async def embedding(query: str, embedder: Any) -> dict:
-    logger.debug(f"query: {query}")
-    return await embedder.run(query)
+async def embedding(
+    query: str, embedder: Any, histories: Optional[list[AskHistory]] = None
+) -> dict:
+    if query:
+        if histories:
+            previous_query_summaries = [
+                history.question for history in histories
+            ]
+        else:
+            previous_query_summaries = []
+
+        query = "\n".join(previous_query_summaries) + "\n" + query
+
+        return await embedder.run(query)
+    else:
+        return {}
 
 
-@async_timer
 @observe(capture_input=False)
-async def table_retrieval(embedding: dict, id: str, table_retriever: Any) -> dict:
+async def table_retrieval(
+    embedding: dict, id: str, tables: list[str], table_retriever: Any
+) -> dict:
     filters = {
         "operator": "AND",
         "conditions": [
@@ -158,24 +149,31 @@ async def table_retrieval(embedding: dict, id: str, table_retriever: Any) -> dic
             {"field": "project_id", "operator": "==", "value": id}
         )
 
-    return await table_retriever.run(
-        query_embedding=embedding.get("embedding"),
-        filters=filters,
-    )
+    if embedding:
+        return await table_retriever.run(
+            query_embedding=embedding.get("embedding"),
+            filters=filters,
+        )
+    else:
+        filters["conditions"].append(
+            {"field": "name", "operator": "in", "value": tables}
+        )
+
+        return await table_retriever.run(
+            query_embedding=[],
+            filters=filters,
+        )
 
 
-@async_timer
 @observe(capture_input=False)
 async def dbschema_retrieval(
-    table_retrieval: dict, embedding: dict, id: str, dbschema_retriever: Any
+    table_retrieval: dict, id: str, dbschema_retriever: Any
 ) -> list[Document]:
     tables = table_retrieval.get("documents", [])
     table_names = []
     for table in tables:
         content = ast.literal_eval(table.content)
         table_names.append(content["name"])
-
-    logger.info(f"dbschema_retrieval with table_names: {table_names}")
 
     table_name_conditions = [
         {"field": "name", "operator": "==", "value": table_name}
@@ -195,13 +193,10 @@ async def dbschema_retrieval(
             {"field": "project_id", "operator": "==", "value": id}
         )
 
-    results = await dbschema_retriever.run(
-        query_embedding=embedding.get("embedding"), filters=filters
-    )
+    results = await dbschema_retriever.run(query_embedding=[], filters=filters)
     return results["documents"]
 
 
-@timer
 @observe()
 def construct_db_schemas(dbschema_retrieval: list[Document]) -> list[dict]:
     db_schemas = {}
@@ -213,7 +208,7 @@ def construct_db_schemas(dbschema_retrieval: list[Document]) -> list[dict]:
             else:
                 db_schemas[document.meta["name"]] = {
                     **content,
-                    "columns": db_schemas[document.meta["name"]]["columns"],
+                    "columns": db_schemas[document.meta["name"]].get("columns", []),
                 }
         elif content["type"] == "TABLE_COLUMNS":
             if document.meta["name"] not in db_schemas:
@@ -230,75 +225,179 @@ def construct_db_schemas(dbschema_retrieval: list[Document]) -> list[dict]:
     return list(db_schemas.values())
 
 
-@timer
+@observe(capture_input=False)
+def check_using_db_schemas_without_pruning(
+    construct_db_schemas: list[dict],
+    dbschema_retrieval: list[Document],
+    encoding: tiktoken.Encoding,
+    allow_using_db_schemas_without_pruning: bool,
+) -> dict:
+    retrieval_results = []
+    has_calculated_field = False
+    has_metric = False
+
+    for table_schema in construct_db_schemas:
+        if table_schema["type"] == "TABLE":
+            ddl, _has_calculated_field = build_table_ddl(table_schema)
+            retrieval_results.append(
+                {
+                    "table_name": table_schema["name"],
+                    "table_ddl": ddl,
+                }
+            )
+            has_calculated_field = has_calculated_field or _has_calculated_field
+
+    for document in dbschema_retrieval:
+        content = ast.literal_eval(document.content)
+
+        if content["type"] == "METRIC":
+            retrieval_results.append(
+                {
+                    "table_name": content["name"],
+                    "table_ddl": _build_metric_ddl(content),
+                }
+            )
+            has_metric = True
+        elif content["type"] == "VIEW":
+            retrieval_results.append(
+                {
+                    "table_name": content["name"],
+                    "table_ddl": _build_view_ddl(content),
+                }
+            )
+
+    table_ddls = [
+        retrieval_result["table_ddl"] for retrieval_result in retrieval_results
+    ]
+    _token_count = len(encoding.encode(" ".join(table_ddls)))
+    if _token_count > 100_000 or not allow_using_db_schemas_without_pruning:
+        return {
+            "db_schemas": [],
+            "tokens": _token_count,
+            "has_calculated_field": has_calculated_field,
+            "has_metric": has_metric,
+        }
+
+    return {
+        "db_schemas": retrieval_results,
+        "tokens": _token_count,
+        "has_calculated_field": has_calculated_field,
+        "has_metric": has_metric,
+    }
+
+
 @observe(capture_input=False)
 def prompt(
-    query: str, construct_db_schemas: list[dict], prompt_builder: PromptBuilder
+    query: str,
+    construct_db_schemas: list[dict],
+    prompt_builder: PromptBuilder,
+    check_using_db_schemas_without_pruning: dict,
+    histories: Optional[list[AskHistory]] = None,
 ) -> dict:
-    logger.info(f"db_schemas: {construct_db_schemas}")
+    if not check_using_db_schemas_without_pruning["db_schemas"]:
+        logger.info(
+            "db_schemas token count is greater than 100,000, so we will prune columns"
+        )
+        db_schemas = [
+            build_table_ddl(construct_db_schema)[0]
+            for construct_db_schema in construct_db_schemas
+        ]
 
-    db_schemas = [
-        _build_table_ddl(construct_db_schema)
-        for construct_db_schema in construct_db_schemas
-    ]
+        previous_query_summaries = (
+            [history.question for history in histories] if histories else []
+        )
 
-    return prompt_builder.run(question=query, db_schemas=db_schemas)
+        query = "\n".join(previous_query_summaries) + "\n" + query
+        return prompt_builder.run(question=query, db_schemas=db_schemas)
+    else:
+        return {}
 
 
-@async_timer
 @observe(as_type="generation", capture_input=False)
 async def filter_columns_in_tables(
     prompt: dict, table_columns_selection_generator: Any
 ) -> dict:
-    logger.debug(f"prompt: {prompt}")
-    return await table_columns_selection_generator.run(prompt=prompt.get("prompt"))
+    if prompt:
+        return await table_columns_selection_generator(prompt=prompt.get("prompt"))
+    else:
+        return {}
 
 
-@timer
 @observe()
 def construct_retrieval_results(
+    check_using_db_schemas_without_pruning: dict,
     filter_columns_in_tables: dict,
     construct_db_schemas: list[dict],
     dbschema_retrieval: list[Document],
-) -> list[str]:
-    columns_and_tables_needed = orjson.loads(filter_columns_in_tables["replies"][0])[
-        "results"
-    ]
-    logger.info(f"columns_and_tables_needed: {columns_and_tables_needed}")
+) -> dict[str, Any]:
+    if filter_columns_in_tables:
+        columns_and_tables_needed = orjson.loads(
+            filter_columns_in_tables["replies"][0]
+        )["results"]
 
-    # we need to change the below code to match the new schema of structured output
-    # the objective of this loop is to change the structure of JSON to match the needed format
-    reformated_json = {}
-    for table in columns_and_tables_needed:
-        reformated_json[table["table_name"]] = table["table_contents"]
-    columns_and_tables_needed = reformated_json
-    tables = set(columns_and_tables_needed.keys())
-    retrieval_results = []
+        # we need to change the below code to match the new schema of structured output
+        # the objective of this loop is to change the structure of JSON to match the needed format
+        reformated_json = {}
+        for table in columns_and_tables_needed:
+            reformated_json[table["table_name"]] = table["table_contents"]
+        columns_and_tables_needed = reformated_json
+        tables = set(columns_and_tables_needed.keys())
+        retrieval_results = []
+        has_calculated_field = False
+        has_metric = False
 
-    for table_schema in construct_db_schemas:
-        if table_schema["type"] == "TABLE" and table_schema["name"] in tables:
-            retrieval_results.append(
-                _build_table_ddl(
+        for table_schema in construct_db_schemas:
+            if table_schema["type"] == "TABLE" and table_schema["name"] in tables:
+                ddl, _has_calculated_field = build_table_ddl(
                     table_schema,
                     columns=set(
                         columns_and_tables_needed[table_schema["name"]]["columns"]
                     ),
                     tables=tables,
                 )
-            )
+                has_calculated_field = has_calculated_field or _has_calculated_field
+                retrieval_results.append(
+                    {
+                        "table_name": table_schema["name"],
+                        "table_ddl": ddl,
+                    }
+                )
 
-    for document in dbschema_retrieval:
-        if document.meta["name"] in columns_and_tables_needed:
-            content = ast.literal_eval(document.content)
+        for document in dbschema_retrieval:
+            if document.meta["name"] in columns_and_tables_needed:
+                content = ast.literal_eval(document.content)
 
-            if content["type"] == "METRIC":
-                retrieval_results.append(_build_metric_ddl(content))
-            elif content["type"] == "VIEW":
-                retrieval_results.append(_build_view_ddl(content))
+                if content["type"] == "METRIC":
+                    retrieval_results.append(
+                        {
+                            "table_name": content["name"],
+                            "table_ddl": _build_metric_ddl(content),
+                        }
+                    )
+                    has_metric = True
+                elif content["type"] == "VIEW":
+                    retrieval_results.append(
+                        {
+                            "table_name": content["name"],
+                            "table_ddl": _build_view_ddl(content),
+                        }
+                    )
 
-    logger.info(f"retrieval_results: {retrieval_results}")
+        return {
+            "retrieval_results": retrieval_results,
+            "has_calculated_field": has_calculated_field,
+            "has_metric": has_metric,
+        }
+    else:
+        retrieval_results = check_using_db_schemas_without_pruning["db_schemas"]
 
-    return retrieval_results
+        return {
+            "retrieval_results": retrieval_results,
+            "has_calculated_field": check_using_db_schemas_without_pruning[
+                "has_calculated_field"
+            ],
+            "has_metric": check_using_db_schemas_without_pruning["has_metric"],
+        }
 
 
 ## End of Pipeline
@@ -321,7 +420,7 @@ RETRIEVAL_MODEL_KWARGS = {
     "response_format": {
         "type": "json_schema",
         "json_schema": {
-            "name": "matched_schema",
+            "name": "retrieval_schema",
             "schema": RetrievalResults.model_json_schema(),
         },
     }
@@ -335,7 +434,8 @@ class Retrieval(BasicPipeline):
         embedder_provider: EmbedderProvider,
         document_store_provider: DocumentStoreProvider,
         table_retrieval_size: Optional[int] = 10,
-        table_column_retrieval_size: Optional[int] = 1000,
+        table_column_retrieval_size: Optional[int] = 100,
+        allow_using_db_schemas_without_pruning: Optional[bool] = False,
         **kwargs,
     ):
         self._components = {
@@ -357,64 +457,49 @@ class Retrieval(BasicPipeline):
             ),
         }
 
+        # for the first time, we need to load the encodings
+        _model = llm_provider.get_model()
+        if "gpt-4o" in _model or "gpt-4o-mini" in _model:
+            _encoding = tiktoken.get_encoding("o200k_base")
+        else:
+            _encoding = tiktoken.get_encoding("cl100k_base")
+
+        self._configs = {
+            "encoding": _encoding,
+            "allow_using_db_schemas_without_pruning": allow_using_db_schemas_without_pruning,
+        }
+
         super().__init__(
             AsyncDriver({}, sys.modules[__name__], result_builder=base.DictResult())
         )
 
-    def visualize(
-        self,
-        query: str,
-        id: Optional[str] = None,
-    ) -> None:
-        destination = "outputs/pipelines/retrieval"
-        if not Path(destination).exists():
-            Path(destination).mkdir(parents=True, exist_ok=True)
-
-        self._pipe.visualize_execution(
-            ["construct_retrieval_results"],
-            output_file_path=f"{destination}/retrieval.dot",
-            inputs={
-                "query": query,
-                "id": id or "",
-                **self._components,
-            },
-            show_legend=True,
-            orient="LR",
-        )
-
-    @async_timer
     @observe(name="Ask Retrieval")
-    async def run(self, query: str, id: Optional[str] = None):
+    async def run(
+        self,
+        query: str = "",
+        tables: Optional[list[str]] = None,
+        id: Optional[str] = None,
+        histories: Optional[list[AskHistory]] = None,
+    ):
         logger.info("Ask Retrieval pipeline is running...")
         return await self._pipe.execute(
             ["construct_retrieval_results"],
             inputs={
                 "query": query,
+                "tables": tables,
                 "id": id or "",
+                "histories": histories,
                 **self._components,
+                **self._configs,
             },
         )
 
 
 if __name__ == "__main__":
-    from langfuse.decorators import langfuse_context
+    from src.pipelines.common import dry_run_pipeline
 
-    from src.core.engine import EngineConfig
-    from src.core.pipeline import async_validate
-    from src.providers import init_langfuse, init_providers, load_env_vars
-
-    load_env_vars()
-    init_langfuse()
-
-    _, embedder_provider, document_store_provider, _ = init_providers(
-        engine_config=EngineConfig()
+    dry_run_pipeline(
+        Retrieval,
+        "db_schema_retrieval",
+        query="this is a test query",
     )
-    pipeline = Retrieval(
-        embedder_provider=embedder_provider,
-        document_store_provider=document_store_provider,
-    )
-
-    pipeline.visualize("this is a query")
-    async_validate(lambda: pipeline.run("this is a query"))
-
-    langfuse_context.flush()

@@ -2,9 +2,9 @@ import uuid
 
 import pytest
 
-from src.core.engine import EngineConfig
-from src.pipelines.generation import sql_breakdown
-from src.providers import init_providers
+from src.config import settings
+from src.pipelines import generation
+from src.providers import generate_components
 from src.web.v1.services.ask_details import (
     AskDetailsRequest,
     AskDetailsResultRequest,
@@ -14,12 +14,14 @@ from src.web.v1.services.ask_details import (
 
 @pytest.fixture
 def ask_details_service():
-    llm_provider, _, _, engine = init_providers(EngineConfig())
+    pipe_components = generate_components(settings.components)
     return AskDetailsService(
         {
-            "sql_breakdown": sql_breakdown.SQLBreakdown(
-                llm_provider=llm_provider,
-                engine=engine,
+            "sql_breakdown": generation.SQLBreakdown(
+                **pipe_components["sql_breakdown"],
+            ),
+            "sql_summary": generation.SQLSummary(
+                **pipe_components["sql_summary"],
             ),
         }
     )

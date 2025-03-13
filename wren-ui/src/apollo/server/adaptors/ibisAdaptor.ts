@@ -14,7 +14,10 @@ import {
 } from '@server/services';
 import { snakeCase } from 'lodash';
 import { WREN_AI_CONNECTION_INFO } from '../repositories';
-import { toIbisConnectionInfo } from '../dataSource';
+import {
+  toIbisConnectionInfo,
+  toMultipleIbisConnectionInfos,
+} from '../dataSource';
 
 const logger = getLogger('IbisAdaptor');
 logger.level = 'debug';
@@ -52,12 +55,21 @@ export interface IbisTrinoConnectionInfo {
   password: string;
 }
 
+export interface IbisSnowflakeConnectionInfo {
+  user: string;
+  password: string;
+  account: string;
+  database: string;
+  schema: string;
+}
+
 export type IbisConnectionInfo =
   | UrlBasedConnectionInfo
   | HostBasedConnectionInfo
   | IbisPostgresConnectionInfo
   | IbisBigQueryConnectionInfo
-  | IbisTrinoConnectionInfo;
+  | IbisTrinoConnectionInfo
+  | IbisSnowflakeConnectionInfo;
 
 export enum SupportedDataSource {
   POSTGRES = 'POSTGRES',
@@ -110,7 +122,7 @@ export interface IIbisAdaptor {
     query: string,
     options: IbisQueryOptions,
   ) => Promise<IbisQueryResponse>;
-  dryRun: (query: string, options: IbisBaseOptions) => Promise<boolean>;
+  dryRun: (query: string, options: IbisBaseOptions) => Promise<DryRunResponse>;
   getTables: (
     dataSource: DataSourceName,
     connectionInfo: WREN_AI_CONNECTION_INFO,
@@ -130,11 +142,18 @@ export interface IIbisAdaptor {
   ) => Promise<ValidationResponse>;
 }
 
-export interface IbisQueryResponse {
+export interface IbisResponse {
+  correlationId?: string;
+  processTime?: string;
+}
+
+export interface IbisQueryResponse extends IbisResponse {
   columns: string[];
   data: any[];
   dtypes: Record<string, string>;
 }
+
+export interface DryRunResponse extends IbisResponse {}
 
 enum IBIS_API_TYPE {
   QUERY = 'QUERY',
@@ -194,14 +213,24 @@ export class IbisAdaptor implements IIbisAdaptor {
           },
         },
       );
-      const response = res.data;
-      return response;
+      return {
+        ...res.data,
+        correlationId: res.headers['x-correlation-id'],
+        processTime: res.headers['x-process-time'],
+      };
     } catch (e) {
-      logger.debug(`Got error when querying ibis: ${e.response.data}`);
+      logger.debug(
+        `Got error when querying ibis: ${e.response?.data || e.message}`,
+      );
 
       throw Errors.create(Errors.GeneralErrorCodes.IBIS_SERVER_ERROR, {
-        customMessage: e.response.data || 'Error querying ibis server',
+        customMessage:
+          e.response?.data || e.message || 'Error querying ibis server',
         originalError: e,
+        other: {
+          correlationId: e.response?.headers['x-correlation-id'],
+          processTime: e.response?.headers['x-process-time'],
+        },
       });
     }
   }
@@ -209,7 +238,7 @@ export class IbisAdaptor implements IIbisAdaptor {
   public async dryRun(
     query: string,
     options: IbisQueryOptions,
-  ): Promise<boolean> {
+  ): Promise<DryRunResponse> {
     const { dataSource, mdl } = options;
     const connectionInfo = this.updateConnectionInfo(options.connectionInfo);
     const ibisConnectionInfo = toIbisConnectionInfo(dataSource, connectionInfo);
@@ -220,17 +249,24 @@ export class IbisAdaptor implements IIbisAdaptor {
     };
     logger.debug(`Dry run sql from ibis with body:`);
     try {
-      await axios.post(
+      const response = await axios.post(
         `${this.ibisServerEndpoint}/${this.getIbisApiVersion(IBIS_API_TYPE.DRY_RUN)}/connector/${dataSourceUrlMap[dataSource]}/query?dryRun=true`,
         body,
       );
       logger.debug(`Ibis server Dry run success`);
-      return true;
+      return {
+        correlationId: response.headers['x-correlation-id'],
+        processTime: response.headers['x-process-time'],
+      };
     } catch (err) {
       logger.info(`Got error when dry running ibis`);
       throw Errors.create(Errors.GeneralErrorCodes.DRY_RUN_ERROR, {
-        customMessage: err.response.data,
+        customMessage: err.response?.data || err.message,
         originalError: err,
+        other: {
+          correlationId: err.response?.headers['x-correlation-id'],
+          processTime: err.response?.headers['x-process-time'],
+        },
       });
     }
   }
@@ -239,25 +275,49 @@ export class IbisAdaptor implements IIbisAdaptor {
     dataSource: DataSourceName,
     connectionInfo: WREN_AI_CONNECTION_INFO,
   ): Promise<CompactTable[]> {
-    connectionInfo = this.updateConnectionInfo(connectionInfo);
-    const ibisConnectionInfo = toIbisConnectionInfo(dataSource, connectionInfo);
-    const body = {
-      connectionInfo: ibisConnectionInfo,
-    };
     try {
-      logger.debug(`Getting tables from ibis`);
-      const res: AxiosResponse<CompactTable[]> = await axios.post(
-        `${this.ibisServerEndpoint}/${this.getIbisApiVersion(IBIS_API_TYPE.METADATA)}/connector/${dataSourceUrlMap[dataSource]}/metadata/tables`,
-        body,
+      const getTablesByConnectionInfo = async (ibisConnectionInfo) => {
+        const body = {
+          connectionInfo: ibisConnectionInfo,
+        };
+        logger.debug(`Getting tables from ibis`);
+        const res: AxiosResponse<CompactTable[]> = await axios.post(
+          `${this.ibisServerEndpoint}/${this.getIbisApiVersion(IBIS_API_TYPE.METADATA)}/connector/${dataSourceUrlMap[dataSource]}/metadata/tables`,
+          body,
+        );
+
+        return this.transformDescriptionToProperties(res.data);
+      };
+
+      connectionInfo = this.updateConnectionInfo(connectionInfo);
+
+      // If the dataSource supports multiple connection info, we need to get tables from each connection info
+      const multipleIbisConnectionInfos = toMultipleIbisConnectionInfos(
+        dataSource,
+        connectionInfo,
       );
+      if (multipleIbisConnectionInfos) {
+        const results = await Promise.all(
+          multipleIbisConnectionInfos.map(getTablesByConnectionInfo),
+        );
+        return results.flat();
+      }
 
-      return this.transformDescriptionToProperties(res.data);
+      // If the dataSource does not support multiple connection info, we only need to get tables from one connection info
+      const ibisConnectionInfo = toIbisConnectionInfo(
+        dataSource,
+        connectionInfo,
+      );
+      return await getTablesByConnectionInfo(ibisConnectionInfo);
     } catch (e) {
-      logger.debug(`Got error when getting table: ${e.response.data}`);
-
+      logger.debug(
+        `Got error when getting table: ${e.response?.data || e.message}`,
+      );
       throw Errors.create(Errors.GeneralErrorCodes.IBIS_SERVER_ERROR, {
         customMessage:
-          e.response.data || 'Error getting table from ibis server',
+          e.response?.data ||
+          e.message ||
+          'Error getting table from ibis server',
         originalError: e,
       });
     }
@@ -280,11 +340,15 @@ export class IbisAdaptor implements IIbisAdaptor {
       );
       return res.data;
     } catch (e) {
-      logger.debug(`Got error when getting constraint: ${e.response.data}`);
+      logger.debug(
+        `Got error when getting constraint: ${e.response?.data || e.message}`,
+      );
 
       throw Errors.create(Errors.GeneralErrorCodes.IBIS_SERVER_ERROR, {
         customMessage:
-          e.response.data || 'Error getting constraint from ibis server',
+          e.response?.data ||
+          e.message ||
+          'Error getting constraint from ibis server',
         originalError: e,
       });
     }
@@ -312,9 +376,11 @@ export class IbisAdaptor implements IIbisAdaptor {
       );
       return { valid: true, message: null };
     } catch (e) {
-      logger.debug(`Got error when validating connection: ${e.response.data}`);
+      logger.debug(
+        `Got error when validating connection: ${e.response?.data || e.message}`,
+      );
 
-      return { valid: false, message: e.response.data };
+      return { valid: false, message: e.response?.data || e.message };
     }
   }
 

@@ -3,7 +3,7 @@ from src.providers import loader
 
 def test_import_mods():
     loader.import_mods("src.providers")
-    assert len(loader.PROVIDERS) == 10
+    assert len(loader.PROVIDERS) == 12
 
 
 def test_get_provider():
@@ -19,6 +19,9 @@ def test_get_provider():
     provider = loader.get_provider("ollama_llm")
     assert provider.__name__ == "OllamaLLMProvider"
 
+    provider = loader.get_provider("litellm_llm")
+    assert provider.__name__ == "LitellmLLMProvider"
+
     # embedder provider
     provider = loader.get_provider("openai_embedder")
     assert provider.__name__ == "OpenAIEmbedderProvider"
@@ -28,6 +31,9 @@ def test_get_provider():
 
     provider = loader.get_provider("ollama_embedder")
     assert provider.__name__ == "OllamaEmbedderProvider"
+
+    provider = loader.get_provider("litellm_embedder")
+    assert provider.__name__ == "LitellmEmbedderProvider"
 
     # document store provider
     provider = loader.get_provider("qdrant")

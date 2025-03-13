@@ -10,7 +10,7 @@ wren-ai-service/src/eval/wren-engine/etc/archived
 wren-ai-service/src/eval/data
 wren-ai-service/**/outputs/
 wren-ai-service/**/spider/
-wren-ai-service/tests/data/hubspot/
+wren-ai-service/tests/data/usecases/
 !wren-ai-service/**/metrics/spider/
 !wren-ai-service/tests/data
 !wren-ai-service/src/eval/data/book_2*.json
@@ -26,7 +26,9 @@ wren-ai-service/demo/poetry.lock
 wren-ai-service/demo/custom_dataset
 wren-ai-service/demo/.env
 wren-ai-service/tools/dev/etc/**
-wren-ai-service/.deepeval-cache.json
+.deepeval-cache.json
+.deepeval_telemtry.txt
+docker/config.yaml
 
 # python
 .python-version
@@ -66,6 +68,8 @@ wren-ui/e2e/e2e.config.json
 wren-ui/.next
 wren-ui/out
 
+wren-ui/.yarn/install-state.gz
+
 ## production
 wren-ui/build
 
@@ -76,6 +80,7 @@ yarn-error.log*
 
 ## local env files
 .env*.local
+.env*
 .env.ai
 
 ## vercel

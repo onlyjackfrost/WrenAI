@@ -8,9 +8,15 @@ export enum PROCESS_STATE {
   IDLE,
   UNDERSTANDING,
   SEARCHING,
+  PLANNING,
   GENERATING,
   FINISHED,
-
   FAILED,
   NO_RESULT,
+}
+
+export enum ANSWER_TAB_KEYS {
+  ANSWER = 'answer',
+  VIEW_SQL = 'view-sql',
+  CHART = 'chart',
 }

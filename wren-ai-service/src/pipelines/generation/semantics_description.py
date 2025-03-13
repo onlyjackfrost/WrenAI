@@ -1,17 +1,15 @@
-import json
 import logging
 import sys
-from pathlib import Path
 from typing import Any
 
 import orjson
 from hamilton import base
-from hamilton.experimental.h_async import AsyncDriver
+from hamilton.async_driver import AsyncDriver
 from haystack.components.builders.prompt_builder import PromptBuilder
 from langfuse.decorators import observe
 from pydantic import BaseModel
 
-from src.core.pipeline import BasicPipeline, async_validate
+from src.core.pipeline import BasicPipeline
 from src.core.provider import LLMProvider
 
 logger = logging.getLogger("wren-ai-service")
@@ -20,19 +18,35 @@ logger = logging.getLogger("wren-ai-service")
 ## Start of Pipeline
 @observe(capture_input=False)
 def picked_models(mdl: dict, selected_models: list[str]) -> list[dict]:
-    def remove_relation_columns(columns: list[dict]) -> list[dict]:
-        # remove columns that have a relationship property
-        return [column for column in columns if "relationship" not in column]
+    def relation_filter(column: dict) -> bool:
+        return "relationship" not in column
+
+    def column_formatter(columns: list[dict]) -> list[dict]:
+        return [
+            {
+                "name": column["name"],
+                "type": column["type"],
+                "properties": {
+                    "description": column["properties"].get("description", ""),
+                },
+            }
+            for column in columns
+            if relation_filter(column)
+        ]
 
     def extract(model: dict) -> dict:
         return {
             "name": model["name"],
-            "columns": remove_relation_columns(model["columns"]),
-            "properties": model["properties"],
+            "columns": column_formatter(model["columns"]),
+            "properties": {
+                "description": model["properties"].get("description", ""),
+            },
         }
 
     return [
-        extract(model) for model in mdl["models"] if model["name"] in selected_models
+        extract(model)
+        for model in mdl.get("models", [])
+        if model.get("name", "") in selected_models
     ]
 
 
@@ -41,16 +55,18 @@ def prompt(
     picked_models: list[dict],
     user_prompt: str,
     prompt_builder: PromptBuilder,
+    language: str,
 ) -> dict:
-    logger.debug(f"User prompt: {user_prompt}")
-    logger.debug(f"Picked models: {picked_models}")
-    return prompt_builder.run(picked_models=picked_models, user_prompt=user_prompt)
+    return prompt_builder.run(
+        picked_models=picked_models,
+        user_prompt=user_prompt,
+        language=language,
+    )
 
 
 @observe(as_type="generation", capture_input=False)
 async def generate(prompt: dict, generator: Any) -> dict:
-    logger.debug(f"prompt: {orjson.dumps(prompt, option=orjson.OPT_INDENT_2).decode()}")
-    return await generator.run(prompt=prompt.get("prompt"))
+    return await generator(prompt=prompt.get("prompt"))
 
 
 @observe(capture_input=False)
@@ -64,16 +80,28 @@ def normalize(generate: dict) -> dict:
             return text_dict
         except orjson.JSONDecodeError as e:
             logger.error(f"Error decoding JSON: {e}")
-            return {}  # Return an empty dictionary if JSON decoding fails
-
-    logger.debug(
-        f"generate: {orjson.dumps(generate, option=orjson.OPT_INDENT_2).decode()}"
-    )
+            return {"models": []}  # Return an empty list if JSON decoding fails
 
     reply = generate.get("replies")[0]  # Expecting only one reply
     normalized = wrapper(reply)
 
     return {model["name"]: model for model in normalized["models"]}
+
+
+@observe(capture_input=False)
+def output(normalize: dict, picked_models: list[dict]) -> dict:
+    def _filter(enriched: list[dict], columns: list[dict]) -> list[dict]:
+        valid_columns = [col["name"] for col in columns]
+
+        return [col for col in enriched if col["name"] in valid_columns]
+
+    models = {model["name"]: model for model in picked_models}
+
+    return {
+        name: {**data, "columns": _filter(data["columns"], models[name]["columns"])}
+        for name, data in normalize.items()
+        if name in models
+    }
 
 
 ## End of Pipeline
@@ -112,11 +140,11 @@ I have a data model represented in JSON format, with the following structure:
 ```
 [
     {'name': 'model', 'columns': [
-            {'name': 'column_1', 'type': 'type', 'notNull': True, 'properties': {}
+            {'name': 'column_1', 'type': 'type', 'properties': {}
             },
-            {'name': 'column_2', 'type': 'type', 'notNull': True, 'properties': {}
+            {'name': 'column_2', 'type': 'type', 'properties': {}
             },
-            {'name': 'column_3', 'type': 'type', 'notNull': False, 'properties': {}
+            {'name': 'column_3', 'type': 'type', 'properties': {}
             }
         ], 'properties': {}
     }
@@ -172,6 +200,7 @@ user_prompt_template = """
 ### Input:
 User's prompt: {{ user_prompt }}
 Picked models: {{ picked_models }}
+Localization Language: {{ language }}
 
 Please provide a brief description for the model and each column based on the user's prompt.
 """
@@ -186,33 +215,10 @@ class SemanticsDescription(BasicPipeline):
                 generation_kwargs=SEMANTICS_DESCRIPTION_MODEL_KWARGS,
             ),
         }
-        self._final = "normalize"
+        self._final = "output"
 
         super().__init__(
             AsyncDriver({}, sys.modules[__name__], result_builder=base.DictResult())
-        )
-
-    def visualize(
-        self,
-        user_prompt: str,
-        selected_models: list[str],
-        mdl: dict,
-    ) -> None:
-        destination = "outputs/pipelines/generation"
-        if not Path(destination).exists():
-            Path(destination).mkdir(parents=True, exist_ok=True)
-
-        self._pipe.visualize_execution(
-            [self._final],
-            output_file_path=f"{destination}/semantics_description.dot",
-            inputs={
-                "user_prompt": user_prompt,
-                "selected_models": selected_models,
-                "mdl": mdl,
-                **self._components,
-            },
-            show_legend=True,
-            orient="LR",
         )
 
     @observe(name="Semantics Description Generation")
@@ -221,6 +227,7 @@ class SemanticsDescription(BasicPipeline):
         user_prompt: str,
         selected_models: list[str],
         mdl: dict,
+        language: str = "en",
     ) -> dict:
         logger.info("Semantics Description Generation pipeline is running...")
         return await self._pipe.execute(
@@ -229,44 +236,20 @@ class SemanticsDescription(BasicPipeline):
                 "user_prompt": user_prompt,
                 "selected_models": selected_models,
                 "mdl": mdl,
+                "language": language,
                 **self._components,
             },
         )
 
 
 if __name__ == "__main__":
-    from langfuse.decorators import langfuse_context
+    from src.pipelines.common import dry_run_pipeline
 
-    from src.core.engine import EngineConfig
-    from src.core.pipeline import async_validate
-    from src.providers import init_providers
-    from src.utils import init_langfuse, load_env_vars
-
-    load_env_vars()
-    init_langfuse()
-
-    llm_provider, _, _, _ = init_providers(EngineConfig())
-    pipeline = SemanticsDescription(llm_provider=llm_provider)
-
-    with open("sample/college_3_bigquery_mdl.json", "r") as file:
-        mdl = json.load(file)
-
-    input = {
-        "user_prompt": "Track student enrollments, grades, and GPA calculations to monitor academic performance and identify areas for student support",
-        "selected_models": [
-            "Student",
-            "Minor_in",
-            "Member_of",
-            "Gradeconversion",
-            "Faculty",
-            "Enrolled_in",
-            "Department",
-            "Course",
-        ],
-        "mdl": mdl,
-    }
-
-    pipeline.visualize(**input)
-    async_validate(lambda: pipeline.run(**input))
-
-    langfuse_context.flush()
+    dry_run_pipeline(
+        SemanticsDescription,
+        "semantics_description",
+        user_prompt="Track student enrollments, grades, and GPA calculations to monitor academic performance and identify areas for student support",
+        selected_models=[],
+        mdl={},
+        language="en",
+    )

@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/common-nighthawk/go-figure"
 	"github.com/manifoldco/promptui"
 	"github.com/pterm/pterm"
+	openai "github.com/sashabaranov/go-openai"
 )
 
 func prepareProjectDir() string {
@@ -46,6 +48,11 @@ func evaluateTelemetryPreferences() (bool, error) {
 
 func askForLLMProvider() (string, error) {
 	// let users know we're asking for a LLM provider
+	pterm.Warning.Println("We highly recommend using OpenAI GPT-4o or GPT-4o-mini with Wren AI.")
+	pterm.Warning.Println("These models have been extensively tested to ensure optimal performance and compatibility.")
+	pterm.Warning.Println("While it is technically possible to integrate other AI models, please note that they have not been fully tested with our system.")
+	pterm.Warning.Println("Therefore, using alternative models is at your own risk and may result in unexpected behavior or suboptimal performance.")
+	fmt.Println("")
 	fmt.Println("Please provide the LLM provider you want to use")
 	fmt.Println("You can learn more about how to set up custom LLMs at https://docs.getwren.ai/oss/installation/custom_llm#running-wren-ai-with-your-custom-llm-or-document-store")
 
@@ -101,7 +108,7 @@ func askForGenerationModel() (string, error) {
 
 	prompt := promptui.Select{
 		Label: "Select an OpenAI's generation model",
-		Items: []string{"gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"},
+		Items: []string{"gpt-4o-mini", "o3-mini", "gpt-4o"},
 	}
 
 	_, result, err := prompt.Run()
@@ -112,18 +119,6 @@ func askForGenerationModel() (string, error) {
 	}
 
 	return result, nil
-}
-
-func isEnvFileValidForCustomLLM(projectDir string) error {
-	// validate if .env.ai file exists in ~/.wrenai
-	envFilePath := path.Join(projectDir, ".env.ai")
-
-	if _, err := os.Stat(envFilePath); os.IsNotExist(err) {
-		errMessage := fmt.Sprintf("Please create a .env.ai file in %s first, more details at https://docs.getwren.ai/oss/installation/custom_llm#running-wren-ai-with-your-custom-llm-or-document-store", projectDir)
-		return errors.New(errMessage)
-	}
-
-	return nil
 }
 
 func Launch() {
@@ -185,15 +180,21 @@ func Launch() {
 			return
 		}
 
+		// check if OpenAI API key is valid
+		shouldReturn = validateOpenaiApiKey(openaiApiKey)
+		if shouldReturn {
+			return
+		}
+
 		// ask for OpenAI generation model
 		pterm.Print("\n")
 		openaiGenerationModel, shouldReturn = getOpenaiGenerationModel()
 		if shouldReturn {
 			return
 		}
-	} else {
-		// check if .env.ai file exists
-		err := isEnvFileValidForCustomLLM(projectDir)
+
+		// prepare config.yaml file for OpenAI
+		err := utils.PrepareConfigFileForOpenAI(projectDir, openaiGenerationModel)
 		if err != nil {
 			panic(err)
 		}
@@ -231,7 +232,7 @@ func Launch() {
 	uiPort := utils.FindAvailablePort(3000)
 	aiPort := utils.FindAvailablePort(5555)
 
-	err = utils.PrepareDockerFiles(openaiApiKey, openaiGenerationModel, uiPort, aiPort, projectDir, telemetryEnabled)
+	err = utils.PrepareDockerFiles(openaiApiKey, openaiGenerationModel, uiPort, aiPort, projectDir, telemetryEnabled, llmProvider)
 	if err != nil {
 		panic(err)
 	}
@@ -245,10 +246,8 @@ func Launch() {
 	}
 
 	pterm.Info.Println("Wren AI is starting, please wait for a moment...")
-	if llmProvider == "Custom" {
-		pterm.Info.Println("If you choose Ollama as LLM provider, please make sure you have started the Ollama service first. Also, Wren AI will automatically pull your chosen models if you have not done so. You can check the progress by executing `docker logs -f wrenai-wren-ai-service-1` in the terminal.")
-	}
-	url := fmt.Sprintf("http://localhost:%d", uiPort)
+	uiUrl := fmt.Sprintf("http://localhost:%d", uiPort)
+	aiUrl := fmt.Sprintf("http://localhost:%d", aiPort)
 	// wait until checking if CheckUIServiceStarted return without error
 	// if timeout 2 minutes, panic
 	timeoutTime := time.Now().Add(2 * time.Minute)
@@ -258,7 +257,7 @@ func Launch() {
 		}
 
 		// check if ui is ready
-		err := utils.CheckUIServiceStarted(url)
+		err := utils.CheckUIServiceStarted(uiUrl)
 		if err == nil {
 			pterm.Info.Println("UI Service is ready")
 			break
@@ -275,7 +274,7 @@ func Launch() {
 		}
 
 		// check if ai service is ready
-		err := utils.CheckAIServiceStarted(aiPort)
+		err := utils.CheckAIServiceStarted(aiUrl)
 		if err == nil {
 			pterm.Info.Println("AI Service is Ready")
 			break
@@ -285,7 +284,7 @@ func Launch() {
 
 	// open browser
 	pterm.Info.Println("Opening browser")
-	utils.Openbrowser(url)
+	utils.Openbrowser(uiUrl)
 
 	pterm.Info.Println("You can now safely close this terminal window")
 	fmt.Scanf("h")
@@ -301,10 +300,9 @@ func getOpenaiGenerationModel() (string, bool) {
 		// validate if input args is a valid generation model
 		pterm.Info.Println("OpenAI generation model is provided")
 		validModels := map[string]bool{
-			"gpt-4o-mini":   true,
-			"gpt-4o":        true,
-			"gpt-4-turbo":   true,
-			"gpt-3.5-turbo": true,
+			"gpt-4o-mini": true,
+			"o3-mini":     true,
+			"gpt-4o":      true,
 		}
 		if !validModels[openaiGenerationModel] {
 			pterm.Error.Println("Invalid generation model", openaiGenerationModel)
@@ -355,4 +353,31 @@ func getLLMProvider() (string, bool) {
 		}
 	}
 	return llmProvider, false
+}
+
+func validateOpenaiApiKey(apiKey string) bool {
+	// validate if input api key is valid by sending a hello request
+	pterm.Info.Println("Sending a hello request to OpenAI...")
+	client := openai.NewClient(apiKey)
+	resp, err := client.CreateChatCompletion(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model: openai.GPT4oMini20240718,
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: "Hello!",
+				},
+			},
+		},
+	)
+
+	// insufficient credit balance error
+	if err != nil {
+		pterm.Error.Println("Invalid API key", err)
+		return true
+	}
+
+	pterm.Info.Println("Valid API key, Response:", resp.Choices[0].Message.Content)
+	return false
 }

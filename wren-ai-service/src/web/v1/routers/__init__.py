@@ -1,31 +1,31 @@
-import uuid
-from dataclasses import asdict
+from fastapi import APIRouter
 
-from fastapi import APIRouter, BackgroundTasks, Depends
-
-from src.globals import (
-    ServiceContainer,
-    ServiceMetadata,
-    get_service_container,
-    get_service_metadata,
+from src.web.v1.routers import (
+    ask,
+    ask_details,
+    chart,
+    chart_adjustment,
+    question_recommendation,
+    relationship_recommendation,
+    semantics_description,
+    semantics_preparation,
+    sql_answers,
+    sql_expansions,
+    sql_pairs,
+    sql_question,
 )
-from src.web.v1.routers import relationship_recommendation, semantics_description, ask,semantics_preparations,ask_details,sql_expansions,sql_answers,sql_regenerations,sql_explanations
 
 router = APIRouter()
-router.include_router(semantics_description.router)
-router.include_router(relationship_recommendation.router)
 router.include_router(ask.router)
 router.include_router(ask_details.router)
-router.include_router(semantics_preparations.router)
-router.include_router(sql_expansions.router)
+router.include_router(question_recommendation.router)
+router.include_router(relationship_recommendation.router)
+router.include_router(semantics_description.router)
+router.include_router(semantics_preparation.router)
 router.include_router(sql_answers.router)
-router.include_router(sql_regenerations.router)
-router.include_router(sql_explanations.router)
-#connected subrouter
-
-
-
-
-
-
-
+router.include_router(sql_expansions.router)
+router.include_router(chart.router)
+router.include_router(chart_adjustment.router)
+router.include_router(sql_pairs.router)
+router.include_router(sql_question.router)
+# connected subrouter

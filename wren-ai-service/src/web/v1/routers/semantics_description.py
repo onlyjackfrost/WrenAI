@@ -11,7 +11,7 @@ from src.globals import (
     get_service_container,
     get_service_metadata,
 )
-from src.web.v1.services.semantics_description import SemanticsDescription
+from src.web.v1.services import Configuration, SemanticsDescription
 
 router = APIRouter()
 
@@ -27,7 +27,11 @@ Endpoints:
      {
        "selected_models": ["model1", "model2"],  # List of model names to describe
        "user_prompt": "Describe these models",   # User's instruction for description
-       "mdl": "{ ... }"                          # JSON string of the MDL (Model Definition Language)
+       "mdl": "{ ... }",                         # JSON string of the MDL (Model Definition Language)
+       "project_id": "project-id",               # Optional project ID
+       "configuration": {                        # Optional configuration settings
+         "language": "English"                   # Optional language, defaults to "English"
+       }
      }
    - Response: PostResponse
      {
@@ -41,28 +45,28 @@ Endpoints:
      {
        "id": "unique-uuid",                      # Unique identifier of the description
        "status": "generating" | "finished" | "failed",
-       "response": {                             # Present only if status is "finished"
-         "model1": {
+       "response": [                             # Present only if status is "finished" or "generating"
+         {
            "name": "model1",
            "columns": [
-              {
-                 "name": "col1",
-                 "description": "Unique identifier for each record in the example model."
-              }
+             {
+               "name": "col1", 
+               "description": "Unique identifier for each record in the example model."
+             }
            ],
            "description": "This model is used for analysis purposes, capturing key attributes of records."
          },
-         "model2": {
-           "name": "model2",
+         {
+           "name": "model2", 
            "columns": [
-              {
-                 "name": "col1",
-                 "description": "Unique identifier for each record in the example model."
-              }
+             {
+               "name": "col1",
+               "description": "Unique identifier for each record in the example model."
+             }
            ],
            "description": "This model is used for analysis purposes, capturing key attributes of records."
          }
-       },
+       ],
        "error": {                                # Present only if status is "failed"
          "code": "OTHERS",
          "message": "Error description"
@@ -85,6 +89,8 @@ class PostRequest(BaseModel):
     selected_models: list[str]
     user_prompt: str
     mdl: str
+    project_id: Optional[str] = None
+    configuration: Optional[Configuration] = Configuration()
 
 
 class PostResponse(BaseModel):
@@ -103,17 +109,16 @@ async def generate(
 ) -> PostResponse:
     id = str(uuid.uuid4())
     service = service_container.semantics_description
-
     service[id] = SemanticsDescription.Resource(id=id)
-    input = SemanticsDescription.Input(
-        id=id,
-        selected_models=request.selected_models,
-        user_prompt=request.user_prompt,
-        mdl=request.mdl,
+
+    generate_request = SemanticsDescription.GenerateRequest(
+        id=id, **request.model_dump()
     )
 
     background_tasks.add_task(
-        service.generate, input, service_metadata=asdict(service_metadata)
+        service.generate,
+        generate_request,
+        service_metadata=asdict(service_metadata),
     )
     return PostResponse(id=id)
 
@@ -123,6 +128,7 @@ class GetResponse(BaseModel):
     status: Literal["generating", "finished", "failed"]
     response: Optional[list[dict]]
     error: Optional[dict]
+    trace_id: Optional[str] = None
 
 
 @router.get(
@@ -159,4 +165,5 @@ async def get(
         status=resource.status,
         response=resource.response and _formatter(resource.response),
         error=resource.error and resource.error.model_dump(),
+        trace_id=resource.trace_id,
     )

@@ -1,26 +1,25 @@
-import { ReactNode, useMemo } from 'react';
-import Link from 'next/link';
-import { Row, Col, Button, Popover, Skeleton } from 'antd';
+import { ReactNode, useEffect, useRef } from 'react';
+import { Button } from 'antd';
 import styled from 'styled-components';
-import { PROCESS_STATE, Path } from '@/utils/enum';
-import { makeIterable } from '@/utils/iteration';
-import CheckCircleOutlined from '@ant-design/icons/CheckCircleOutlined';
-import FunctionOutlined from '@ant-design/icons/FunctionOutlined';
+import { PROCESS_STATE } from '@/utils/enum';
 import CloseOutlined from '@ant-design/icons/CloseOutlined';
 import StopOutlined from '@ant-design/icons/StopFilled';
 import LoadingOutlined from '@ant-design/icons/LoadingOutlined';
 import CloseCircleFilled from '@ant-design/icons/CloseCircleFilled';
 import WarningOutlined from '@ant-design/icons/WarningOutlined';
-import FileAddOutlined from '@ant-design/icons/FileAddOutlined';
-import { SparklesIcon } from '@/utils/icons';
-import ViewSQLModal from '@/components/pages/home/prompt/ViewSQLModal';
-import EllipsisWrapper from '@/components/EllipsisWrapper';
+import MessageOutlined from '@ant-design/icons/MessageOutlined';
 import ErrorCollapse from '@/components/ErrorCollapse';
-import useModalAction from '@/hooks/useModalAction';
-import useAskProcessState, {
-  getIsProcessing,
-} from '@/hooks/useAskProcessState';
-import { AskingTask } from '@/apollo/client/graphql/__types__';
+import InfoCircleOutlined from '@ant-design/icons/InfoCircleOutlined';
+import useAskProcessState from '@/hooks/useAskProcessState';
+import RecommendedQuestions, {
+  getRecommendedQuestionProps,
+} from '@/components/pages/home/RecommendedQuestions';
+import MarkdownBlock from '@/components/editor/MarkdownBlock';
+import {
+  AskingTask,
+  AskingTaskType,
+  RecommendedQuestionsTask,
+} from '@/apollo/client/graphql/__types__';
 
 const StyledResult = styled.div`
   position: absolute;
@@ -33,174 +32,46 @@ const StyledResult = styled.div`
     rgba(0, 0, 0, 0.05) 0px 4px 6px -2px;
 `;
 
-const ResultBlock = styled.div`
-  user-select: none;
-  overflow: hidden;
-  &:hover {
-    border-color: var(--geekblue-6) !important;
-    transition: border-color ease 0.2s;
-  }
-`;
-
-const MarkedResultBlock = styled.div`
-  height: 32px;
-  margin-left: -12px;
-  margin-right: -12px;
-  padding-top: 8px;
-`;
-
-const StyledSkeleton = styled(Skeleton)`
-  margin-bottom: 22px;
-  .ant-skeleton-title {
-    height: 14px;
-    margin-top: 4px;
-
-    + .ant-skeleton-paragraph {
-      margin-top: 20px;
-      li {
-        height: 14px;
-        + li {
-          margin-top: 8px;
-        }
-      }
-    }
-  }
-`;
-
 interface Props {
   processState: ReturnType<typeof useAskProcessState>;
-  data: AskingTask['candidates'];
+  data: {
+    type: AskingTaskType;
+    originalQuestion: string;
+    candidates: AskingTask['candidates'];
+    askingStreamTask: string;
+    recommendedQuestions: RecommendedQuestionsTask;
+    intentReasoning: string;
+  };
   error?: any;
-  onSelect: (payload: { sql: string; summary: string }) => void;
+  onSelectResult: (payload: { sql: string; viewId: number | null }) => void;
+  onSelectQuestion: ({
+    question,
+    sql,
+  }: {
+    question: string;
+    sql: string;
+  }) => void;
   onClose: () => void;
   onStop: () => void;
   loading?: boolean;
 }
 
-const ResultSkeleton = () => (
-  <div className="border border-gray-5 rounded px-3 pt-3 ">
-    <StyledSkeleton active paragraph={{ rows: 3 }} />
-  </div>
-);
-
-const ResultTemplate = ({
-  index,
-  summary,
-  sql,
-  view,
-  loading,
-  onSelect,
-  onShowSQL,
-}) => {
-  const isViewSaved = !!view;
-
-  if (loading) {
-    return (
-      <Col span={8}>
-        <ResultSkeleton />
-      </Col>
-    );
-  }
-
+const Wrapper = ({ children }) => {
   return (
-    <Col span={8}>
-      <ResultBlock
-        className="border border-gray-5 rounded px-3 pt-3 cursor-pointer"
-        onClick={() => onSelect({ sql, summary, viewId: view?.id })}
-      >
-        <div className="d-flex justify-space-between align-center text-sm mb-3">
-          <div className="border border-gray-5 px-2 rounded-pill">
-            Result {index + 1}
-          </div>
-          <Button
-            className="adm-btn-no-style gray-6 text-sm px-1"
-            type="text"
-            onClick={(event) => onShowSQL(event, { sql, summary })}
-          >
-            <FunctionOutlined className="-mr-1" />
-            View SQL
-          </Button>
-        </div>
-        <EllipsisWrapper multipleLine={3} minHeight={66} text={summary} />
-        <MarkedResultBlock onClickCapture={(event) => event.stopPropagation()}>
-          {isViewSaved && (
-            <Popover
-              trigger={['hover']}
-              placement="topLeft"
-              content={
-                <div className="d-flex" style={{ width: 300 }}>
-                  <SparklesIcon
-                    className="text-md geekblue-6 mr-2"
-                    style={{ marginTop: 2 }}
-                  />
-                  <div style={{ width: '90%', wordBreak: 'break-all' }}>
-                    This search result corresponds to a saved view:{' '}
-                    <Link
-                      href={`${Path.Modeling}?viewId=${view.id}&openMetadata=true`}
-                      target="_blank"
-                      rel="noreferrer noopener"
-                    >
-                      {view.displayName}
-                    </Link>
-                  </div>
-                </div>
-              }
-            >
-              <div className="d-flex align-center bg-geekblue-1 geekblue-6 text-xs px-3 py-1">
-                <FileAddOutlined className="text-sm mr-2" /> Result from a saved
-                view
-              </div>
-            </Popover>
-          )}
-        </MarkedResultBlock>
-      </ResultBlock>
-    </Col>
-  );
-};
-const ResultColumnIterator = makeIterable(ResultTemplate);
-const CandidateResults = (props: Props) => {
-  const { data = [], loading, onSelect } = props;
-
-  // Remain showing 3 results when in loading mode,
-  // If no data, provide loading property to result template to show skeleton
-  const results = useMemo(() => {
-    return loading
-      ? Array.from({ length: 3 }).map((_, index) => {
-          return data[index] || { loading };
-        })
-      : data;
-  }, [data]);
-
-  const viewSQLModal = useModalAction();
-
-  const showSQL = (event, payload: { sql: string; summary: string }) => {
-    viewSQLModal.openModal(payload);
-    event.stopPropagation();
-  };
-
-  const selectResult = (payload: { sql: string; summary: string }) => {
-    onSelect && onSelect(payload);
-  };
-
-  return (
-    <>
-      <Row gutter={[12, 12]}>
-        <ResultColumnIterator
-          data={results}
-          onShowSQL={showSQL}
-          onSelect={selectResult}
-        />
-      </Row>
-      <ViewSQLModal {...viewSQLModal.state} onClose={viewSQLModal.closeModal} />
-    </>
+    <StyledResult
+      className="border border-gray-3 rounded p-4"
+      data-testid="prompt__result"
+    >
+      {children}
+    </StyledResult>
   );
 };
 
 const makeProcessing = (text: string) => (props: Props) => {
-  const { onStop, processState } = props;
+  const { onStop } = props;
   return (
-    <div>
-      <div className="d-flex justify-space-between mb-3">
+    <Wrapper>
+      <div className="d-flex justify-space-between">
         <span>
           <LoadingOutlined className="mr-2 geekblue-6 text-lg" spin />
           {text}
@@ -215,22 +86,23 @@ const makeProcessing = (text: string) => (props: Props) => {
           Stop
         </Button>
       </div>
-      <CandidateResults
-        {...props}
-        loading={getIsProcessing(processState.currentState)}
-      />
-    </div>
+    </Wrapper>
   );
 };
 
 const makeProcessingError =
   (config: { icon: ReactNode; title?: string; description?: string }) =>
   (props: Props) => {
-    const { onClose, error } = props;
+    const { onClose, onSelectQuestion, data, error } = props;
     const { message, shortMessage, stacktrace } = error || {};
     const hasStacktrace = !!stacktrace;
+
+    const recommendedQuestionProps = getRecommendedQuestionProps(
+      data?.recommendedQuestions,
+    );
+
     return (
-      <div>
+      <Wrapper>
         <div className="d-flex justify-space-between text-medium mb-2">
           <div className="d-flex align-center">
             {config.icon}
@@ -246,11 +118,21 @@ const makeProcessingError =
             Close
           </Button>
         </div>
-        <div className="gray-7">{config.description || message}</div>
+        <div className="gray-7">
+          {config.description || data.intentReasoning || message}
+        </div>
         {hasStacktrace && (
           <ErrorCollapse className="mt-2" message={stacktrace.join('\n')} />
         )}
-      </div>
+
+        {recommendedQuestionProps.show && (
+          <RecommendedQuestions
+            className="mt-2"
+            {...recommendedQuestionProps.state}
+            onSelect={onSelectQuestion}
+          />
+        )}
+      </Wrapper>
     );
   };
 
@@ -268,18 +150,63 @@ const NoResult = makeProcessingError({
 
 const Understanding = makeProcessing('Understanding question');
 const Searching = makeProcessing('Searching data');
-const Generating = makeProcessing('Generating result(s)');
+const Planning = makeProcessing('Organizing thoughts');
+const Generating = makeProcessing('Generating answer');
 const Finished = (props: Props) => {
-  const { data, onClose } = props;
+  const { data, onSelectResult } = props;
+  // only one candidate
+  const { candidates } = data;
 
-  if (data.length === 0) return <NoResult {...props} />;
+  useEffect(() => {
+    if (candidates.length) {
+      const [result] = candidates;
+      onSelectResult &&
+        onSelectResult({ sql: result.sql, viewId: result.view?.id });
+    }
+  }, [data]);
+
+  if (candidates.length === 0)
+    return (
+      <Wrapper>
+        <NoResult {...props} />
+      </Wrapper>
+    );
+
+  return null;
+};
+
+const GeneralAnswer = (props: Props) => {
+  const { onClose, onSelectQuestion, data, loading } = props;
+  const $wrapper = useRef<HTMLDivElement>(null);
+
+  const { originalQuestion, askingStreamTask, recommendedQuestions } = data;
+  const isDone = askingStreamTask && !loading;
+
+  const scrollBottom = () => {
+    if ($wrapper.current) {
+      $wrapper.current.scrollTo({
+        top: $wrapper.current.scrollHeight,
+      });
+    }
+  };
+
+  useEffect(() => {
+    scrollBottom();
+  }, [askingStreamTask]);
+
+  useEffect(() => {
+    if (isDone) scrollBottom();
+  }, [isDone]);
+
+  const recommendedQuestionProps =
+    getRecommendedQuestionProps(recommendedQuestions);
 
   return (
-    <div>
-      <div className="d-flex justify-space-between mb-3">
-        <div className="d-flex align-center text-medium">
-          <CheckCircleOutlined className="mr-2 green-7 text-lg" /> {data.length}{' '}
-          result(s) found
+    <Wrapper>
+      <div className="d-flex justify-space-between">
+        <div className="d-flex align-start">
+          <MessageOutlined className="mr-2 mt-1 geekblue-6" />
+          <b className="text-semi-bold">{originalQuestion}</b>
         </div>
         <Button
           className="adm-btn-no-style gray-7 bg-gray-3 text-sm px-2"
@@ -291,16 +218,59 @@ const Finished = (props: Props) => {
           Close
         </Button>
       </div>
-      <CandidateResults {...props} />
-    </div>
+      <div className="py-3">
+        <div
+          ref={$wrapper}
+          className="py-2 px-3"
+          style={{ maxHeight: 'calc(100vh - 420px)', overflowY: 'auto' }}
+        >
+          <MarkdownBlock content={askingStreamTask} />
+          {isDone && (
+            <div className="gray-6">
+              <InfoCircleOutlined className="mr-2" />
+              For the most accurate semantics, please visit the modeling page.
+            </div>
+          )}
+        </div>
+      </div>
+
+      {recommendedQuestionProps.show && (
+        <RecommendedQuestions
+          {...recommendedQuestionProps.state}
+          onSelect={onSelectQuestion}
+        />
+      )}
+    </Wrapper>
   );
 };
 
-const getProcessStateComponent = (state: PROCESS_STATE) => {
+const MisleadingQuery = makeProcessingError({
+  icon: <WarningOutlined className="mr-2 text-lg gold-6" />,
+  title: 'Clarification needed',
+});
+
+const getGeneralAnswerStateComponent = (state: PROCESS_STATE) => {
+  return (
+    {
+      [PROCESS_STATE.FINISHED]: GeneralAnswer,
+    }[state] || null
+  );
+};
+
+const getMisleadingQueryStateComponent = (state: PROCESS_STATE) => {
+  return (
+    {
+      [PROCESS_STATE.FINISHED]: MisleadingQuery,
+    }[state] || null
+  );
+};
+
+const getDefaultStateComponent = (state: PROCESS_STATE) => {
   return (
     {
       [PROCESS_STATE.UNDERSTANDING]: Understanding,
       [PROCESS_STATE.SEARCHING]: Searching,
+      [PROCESS_STATE.PLANNING]: Planning,
       [PROCESS_STATE.GENERATING]: Generating,
       [PROCESS_STATE.FINISHED]: Finished,
       [PROCESS_STATE.FAILED]: Failed,
@@ -308,16 +278,22 @@ const getProcessStateComponent = (state: PROCESS_STATE) => {
   );
 };
 
-export default function PromptResult(props: Props) {
-  const { processState } = props;
+const makeProcessStateStrategy = (type: AskingTaskType) => {
+  // note that the asking task type only has value when the asking status was finished
+  // by default, we use the default state component (also the text to sql state component)
+  if (type === AskingTaskType.GENERAL) return getGeneralAnswerStateComponent;
+  if (type === AskingTaskType.MISLEADING_QUERY)
+    return getMisleadingQueryStateComponent;
+  return getDefaultStateComponent;
+};
 
+export default function PromptResult(props: Props) {
+  const { processState, data } = props;
+
+  const getProcessStateComponent = makeProcessStateStrategy(data?.type);
   const StateComponent = getProcessStateComponent(processState.currentState);
 
   if (StateComponent === null) return null;
 
-  return (
-    <StyledResult className="border border-gray-3 rounded p-4">
-      <StateComponent {...props} />
-    </StyledResult>
-  );
+  return <StateComponent {...props} />;
 }
