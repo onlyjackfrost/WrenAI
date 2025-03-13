@@ -109,6 +109,8 @@ const config = {
   generationModel: process.env.GENERATION_MODEL,
 
   // ibis server
+
+  // test
   experimentalEngineRustVersion:
     process.env.EXPERIMENTAL_ENGINE_RUST_VERSION === 'true',
   ibisServerEndpoint: process.env.IBIS_SERVER_ENDPOINT,
