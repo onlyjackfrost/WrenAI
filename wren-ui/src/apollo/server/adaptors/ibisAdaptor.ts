@@ -248,6 +248,7 @@ export class IbisAdaptor implements IIbisAdaptor {
       manifestStr: Buffer.from(JSON.stringify(mdl)).toString('base64'),
     };
     logger.debug(`Dry run sql from ibis with body:`);
+    console.log(body);
     try {
       const response = await axios.post(
         `${this.ibisServerEndpoint}/${this.getIbisApiVersion(IBIS_API_TYPE.DRY_RUN)}/connector/${dataSourceUrlMap[dataSource]}/query?dryRun=true`,
